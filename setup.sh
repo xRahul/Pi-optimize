@@ -355,20 +355,25 @@ nodejs_setup() {
     
     log_info "Configuring Gemini CLI for $target_user..."
     
-    # Create configuration with Preview Features enabled
+    # Create configuration with Preview Features enabled (if not exists)
     mkdir -p "$gemini_dir"
-    cat > "$gemini_dir/settings.json" << 'EOF'
+    if [[ ! -f "$gemini_dir/settings.json" ]]; then
+        cat > "$gemini_dir/settings.json" << 'EOF'
 {
     "general": {
         "previewFeatures": true
     }
 }
 EOF
+        log_pass "Gemini settings configured (Preview Features: Enabled)"
+    else
+        log_info "Gemini settings already exist"
+    fi
+    
     # Set permissions for the user (since we are running as root)
     if [[ -n "$SUDO_USER" ]]; then
         chown -R "$target_user:$target_user" "$gemini_dir"
     fi
-    log_pass "Gemini settings configured (Preview Features: Enabled)"
 }
 
 ################################################################################
@@ -579,7 +584,7 @@ hardware_pruning() {
     backup_file "$CONFIG_FILE"
     
     log_info "Disabling Bluetooth..."
-    if grep -q "dtoverlay=disable-bt" "$CONFIG_FILE"; then
+    if grep -q "^dtoverlay=disable-bt" "$CONFIG_FILE"; then
         log_info "  Bluetooth already disabled"
     else
         echo "dtoverlay=disable-bt" >> "$CONFIG_FILE"
@@ -587,7 +592,7 @@ hardware_pruning() {
     fi
     
     log_info "Disabling audio..."
-    if grep -q "dtparam=audio=off" "$CONFIG_FILE"; then
+    if grep -q "^dtparam=audio=off" "$CONFIG_FILE"; then
         log_info "  Audio already disabled"
     else
         echo "dtparam=audio=off" >> "$CONFIG_FILE"
@@ -612,7 +617,7 @@ apply_optimizations() {
     
     # Fan configuration for Pi 5
     log_info "Configuring active cooling (Pi 5)..."
-    if grep -q "dtparam=fan_temp0" "$CONFIG_FILE"; then
+    if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
         log_info "  Fan curve already configured"
     else
         cat >> "$CONFIG_FILE" << 'EOF'

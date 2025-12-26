@@ -80,7 +80,7 @@ thermal_optimization() {
     log_info "Configuring active cooling (Pi 5 with heatsink/fan)..."
     
     # Check if already configured
-    if grep -q "dtparam=fan_temp0" "$CONFIG_FILE"; then
+    if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
         log_skip "Fan curve already configured"
     else
         cat >> "$CONFIG_FILE" << 'EOF'
@@ -114,7 +114,7 @@ watchdog_configuration() {
     fi
     
     # Enable in config.txt
-    if grep -q "dtparam=watchdog=on" "$CONFIG_FILE"; then
+    if grep -q "^dtparam=watchdog=on" "$CONFIG_FILE"; then
         log_skip "Watchdog already enabled in boot config"
     else
         echo "dtparam=watchdog=on" >> "$CONFIG_FILE"
