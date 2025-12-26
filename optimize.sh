@@ -199,13 +199,13 @@ usb_write_optimization() {
             case "$usb_fstype" in
                 ext4)
                     log_info "Note: /mnt/usb (ext4) should have: defaults,nofail,noatime,errors=remount-ro"
-                    ;;;;
+                    ;;
                 vfat|ntfs|exfat)
                     log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;;;
+                    ;;
                 *)
                     log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;;;
+                    ;;
             esac
             log_info "      Edit /etc/fstab and remount: sudo mount -o remount /mnt/usb"
         fi
