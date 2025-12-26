@@ -163,16 +163,10 @@ install_dependencies() {
         "lsb-release"
         "apt-transport-https"
         "wget"
-        "htop"
-        "iotop"
-        "nethogs"
         "git"
         "jq"
         "bc"
-        "pciutils"
         "usbutils"
-        "nvme-cli"
-        "smartmontools"
         "util-linux"
         "watchdog"
         "e2fsprogs"
@@ -325,6 +319,27 @@ EOF
     log_info "Docker version: $docker_version"
     log_info "Docker storage info:"
     echo "$docker_info" | sed 's/^/  /'
+}
+
+nodejs_setup() {
+    log_section "NODE.JS & GEMINI SETUP"
+    
+    if command_exists node && command_exists npm; then
+        log_pass "Node.js already installed: $(node -v)"
+    else
+        log_info "Installing Node.js (LTS via NodeSource)..."
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1
+        apt install -y nodejs || log_error "Failed to install Node.js"
+        log_pass "Node.js installed: $(node -v)"
+    fi
+    
+    if command_exists gemini || command_exists gemini-chat; then
+        log_pass "Gemini CLI already installed"
+    else
+        log_info "Installing Gemini CLI (gemini-chat-cli)..."
+        npm install -g gemini-chat-cli || log_warn "Failed to install gemini-chat-cli"
+        log_pass "Gemini CLI installed"
+    fi
 }
 
 ################################################################################
@@ -673,6 +688,7 @@ main() {
     # Docker
     docker_install
     docker_setup
+    nodejs_setup
     
     # USB Mount
     usb_mount_setup
