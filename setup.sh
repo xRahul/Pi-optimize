@@ -333,13 +333,24 @@ nodejs_setup() {
         log_pass "Node.js installed: $(node -v)"
     fi
     
-    if command_exists gemini || command_exists gemini-chat; then
-        log_pass "Gemini CLI already installed"
-    else
-        log_info "Installing Gemini CLI (gemini-chat-cli)..."
-        npm install -g gemini-chat-cli || log_warn "Failed to install gemini-chat-cli"
-        log_pass "Gemini CLI installed"
+    # Gemini CLI Configuration
+    local target_user="${SUDO_USER:-$USER}"
+    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    local gemini_dir="$target_home/.gemini"
+    
+    log_info "Configuring Gemini CLI for $target_user..."
+    mkdir -p "$gemini_dir"
+    cat > "$gemini_dir/settings.json" << 'EOF'
+{
+    "general": {
+        "previewFeatures": true
+    }
+}
+EOF
+    if [[ -n "$SUDO_USER" ]]; then
+        chown -R "$target_user:$target_user" "$gemini_dir"
     fi
+    log_pass "Gemini settings configured (Preview Features: Enabled)"
 }
 
 ################################################################################

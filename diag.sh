@@ -320,6 +320,14 @@ if command_exists npm; then
         log_info "  Node.js: $NODE_VERSION"
     fi
     
+    # Gemini CLI Check
+    if [[ -f "$HOME/.gemini/settings.json" ]]; then
+        PREVIEW=$(grep "previewFeatures" "$HOME/.gemini/settings.json" | grep -q "true" && echo "Enabled" || echo "Disabled")
+        log_pass "  Gemini CLI: Configured (Preview: $PREVIEW)"
+    else
+        log_warn "  Gemini CLI: No settings found at ~/.gemini/settings.json"
+    fi
+    
     # npm cache
     NPM_CACHE_SIZE=$(du -sh "$HOME/.npm" 2>/dev/null | awk '{print $1}')
     if [[ -n "$NPM_CACHE_SIZE" ]]; then
