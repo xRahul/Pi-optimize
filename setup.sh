@@ -3,13 +3,19 @@
 ################################################################################
 # Raspberry Pi Home Server Setup
 # Target: Raspberry Pi OS Debian Trixie (aarch64)
-# Features: Docker setup, USB mounting, Tailscale, optimizations
+# Features: Docker setup, USB mounting, Node.js/Gemini, optimizations
+# License: MIT (Copyright 2025 Rahul)
+#
+# DESCRIPTION:
+# This script automates the provisioning of a headless Raspberry Pi 5 server.
+# It ensures all critical software (Docker, Node.js) and hardware configs
+# (USB mounts, fan curves) are applied correctly from a fresh install.
 ################################################################################
 
 set -o pipefail
 IFS=$'\n\t'
 
-# Color codes
+# Color codes for readable output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -18,12 +24,12 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.5"
 USB_MOUNT_PATH="/mnt/usb"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Counters
+# Counters for summary
 CHECKS_PASSED=0
 CHECKS_FAILED=0
 WARNINGS=0
@@ -44,6 +50,7 @@ log_error() { echo -e "\n${RED}ERROR: $1${NC}"; exit 1; }
 # Utility Functions
 ################################################################################
 
+# Ensure script is run with sudo
 require_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root (sudo)"
@@ -54,6 +61,7 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Interactive prompt for user decisions
 confirm_action() {
     local prompt="$1"
     local response
@@ -61,13 +69,14 @@ confirm_action() {
     while true; do
         read -p "$(echo -e ${CYAN}$prompt${NC} [y/N]: )" -r response
         case "$response" in
-            [yY][eE][sS]|[yY]) return 0 ;;
-            [nN][oO]|[nN]|"") return 1 ;;
-            *) echo "Please answer yes or no." ;;
+            [yY][eE][sS]|[yY]) return 0 ;; 
+            [nN][oO]|[nN]|"") return 1 ;; 
+            *) echo "Please answer yes or no." ;; 
         esac
     done
 }
 
+# Creates timestamped backup of config files before editing
 backup_file() {
     local file="$1"
     if [[ -f "$file" ]]; then
@@ -83,12 +92,13 @@ wait_for_user() {
 
 ################################################################################
 # Pre-flight Checks
+# Verifies the environment is suitable for this script.
 ################################################################################
 
 preflight_checks() {
     log_section "PRE-FLIGHT CHECKS"
     
-    # Check distribution
+    # Check distribution (Must be Debian-based)
     if [[ ! -f /etc/os-release ]]; then
         log_error "Cannot determine OS release"
     fi
@@ -97,7 +107,7 @@ preflight_checks() {
     log_info "OS: $PRETTY_NAME"
     log_info "Kernel: $(uname -r)"
     
-    # Check for Debian Trixie
+    # Warn if not Trixie (Debian 13), but allow proceed
     if [[ "$VERSION_CODENAME" != "trixie" ]] && [[ "$PRETTY_NAME" != *"Trixie"* ]]; then
         log_warn "This script is optimized for Debian Trixie. Current: $VERSION_CODENAME"
         if ! confirm_action "Continue anyway?"; then
@@ -105,7 +115,7 @@ preflight_checks() {
         fi
     fi
     
-    # Check architecture
+    # Check architecture (Must be 64-bit ARM)
     local arch=$(uname -m)
     if [[ "$arch" != "aarch64" ]]; then
         log_fail "Architecture: $arch (expected aarch64)"
@@ -114,7 +124,7 @@ preflight_checks() {
         log_pass "Architecture: $arch (64-bit ARM)"
     fi
     
-    # Check internet connectivity
+    # Check internet connectivity (Required for apt)
     if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
         log_pass "Internet connectivity: Available"
     else
@@ -122,7 +132,7 @@ preflight_checks() {
         log_error "Internet connection required for package installation"
     fi
     
-    # Check disk space
+    # Check disk space on SD card
     local free_space=$(df / | awk 'NR==2 {print $4}')
     if [[ $free_space -lt 1048576 ]]; then  # < 1GB
         log_fail "Root disk space: $(df -h / | awk 'NR==2 {print $4}') - need at least 1GB"
@@ -156,20 +166,21 @@ system_update() {
 install_dependencies() {
     log_section "INSTALLING DEPENDENCIES"
     
+    # Essential tools for the server stack
     local packages=(
-        "ca-certificates"
-        "curl"
-        "gnupg"
-        "lsb-release"
-        "apt-transport-https"
-        "wget"
-        "git"
-        "jq"
-        "bc"
-        "usbutils"
-        "util-linux"
-        "watchdog"
-        "e2fsprogs"
+        "ca-certificates"       # SSL verification
+        "curl"                  # Data transfer
+        "gnupg"                 # Key management
+        "lsb-release"           # OS info
+        "apt-transport-https"   # Secure apt
+        "wget"                  # Downloads
+        "git"                   # Version control
+        "jq"                    # JSON parsing (used for Docker config)
+        "bc"                    # Math (used for diag thresholds)
+        "usbutils"              # USB diag (lsusb)
+        "util-linux"            # Block device tools (lsblk, blkid)
+        "watchdog"              # Hardware watchdog daemon
+        "e2fsprogs"             # Filesystem tools (mkfs.ext4)
     )
     
     log_info "Installing required packages..."
@@ -185,6 +196,7 @@ install_dependencies() {
 
 ################################################################################
 # Docker Installation & Setup
+# Installs official Docker CE and configures the daemon.
 ################################################################################
 
 docker_install() {
@@ -213,6 +225,7 @@ docker_install() {
     chmod a+r /etc/apt/keyrings/docker.asc || log_error "Failed to set permissions on GPG key"
     
     log_info "Adding Docker repository to APT sources..."
+    # Dynamically determine codename (usually trixie or bookworm)
     local codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
     tee /etc/apt/sources.list.d/docker.sources > /dev/null << EOF
 Types: deb
@@ -269,6 +282,7 @@ docker_setup() {
     mkdir -p /etc/docker
     
     # Check if USB is mounted and is ext4 (required for overlay2)
+    # This prevents Docker from failing on vfat/exfat drives
     local usb_fstype=$(findmnt -n -o FSTYPE -T "$USB_MOUNT_PATH" 2>/dev/null)
     
     if [[ "$usb_fstype" == "ext4" ]]; then
@@ -324,6 +338,7 @@ EOF
 nodejs_setup() {
     log_section "NODE.JS & GEMINI SETUP"
     
+    # Install Node.js LTS if missing
     if command_exists node && command_exists npm; then
         log_pass "Node.js already installed: $(node -v)"
     else
@@ -333,12 +348,14 @@ nodejs_setup() {
         log_pass "Node.js installed: $(node -v)"
     fi
     
-    # Gemini CLI Configuration
+    # Install and Configure Gemini CLI
     local target_user="${SUDO_USER:-$USER}"
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
     local gemini_dir="$target_home/.gemini"
     
     log_info "Configuring Gemini CLI for $target_user..."
+    
+    # Create configuration with Preview Features enabled
     mkdir -p "$gemini_dir"
     cat > "$gemini_dir/settings.json" << 'EOF'
 {
@@ -347,6 +364,7 @@ nodejs_setup() {
     }
 }
 EOF
+    # Set permissions for the user (since we are running as root)
     if [[ -n "$SUDO_USER" ]]; then
         chown -R "$target_user:$target_user" "$gemini_dir"
     fi
@@ -467,7 +485,7 @@ usb_mount_setup() {
         log_pass "Mount point exists: $USB_MOUNT_PATH"
     fi
     
-    # Mount the device
+    # Mount the device (Robustness: Check if already mounted)
     if mount | grep -q "on $USB_MOUNT_PATH type"; then
         log_info "Device already mounted at $USB_MOUNT_PATH"
     else
@@ -502,14 +520,14 @@ usb_mount_setup() {
     
     log_info "Configuring persistent mount in /etc/fstab..."
     
-    # Remove existing entry if present (check by mount point)
+    # Remove existing entry if present (check by mount point) to avoid duplicates
     if grep -q "$USB_MOUNT_PATH" /etc/fstab; then
         log_warn "Entry already exists in /etc/fstab for $USB_MOUNT_PATH"
         log_info "Removing old entry..."
-        sed -i "\|$USB_MOUNT_PATH|d" /etc/fstab
+        sed -i "|$USB_MOUNT_PATH|d" /etc/fstab
     fi
     
-    # Get UUID for robust mounting
+    # Get UUID for robust mounting (Prevents issues if device letters change)
     local uuid=$(blkid -s UUID -o value "$usb_device")
     local fstab_device="$usb_device"
     
@@ -519,6 +537,7 @@ usb_mount_setup() {
         log_warn "Could not get UUID for $usb_device, falling back to device path"
     fi
 
+    # Append new entry
     cat >> /etc/fstab << EOF
 # External USB drive for Docker volumes and data storage
 $fstab_device $USB_MOUNT_PATH $fstype $mount_opts 0 2
@@ -699,28 +718,30 @@ main() {
     log_info "Target: Raspberry Pi OS Debian Trixie with Docker + USB"
     log_info ""
     
-    # Pre-flight
+    # Pre-flight checks (OS, Arch, Connectivity)
     preflight_checks
     
-    # System update
+    # System update & dependency installation
     system_update
     install_dependencies
     
-    # Docker
+    # Docker installation & configuration
     docker_install
     docker_setup
+    
+    # Node.js & Gemini CLI setup
     nodejs_setup
     
-    # USB Mount
+    # USB Mount configuration (detect, format, mount)
     usb_mount_setup
     
-    # Hardware
+    # Hardware pruning (Bluetooth/Audio)
     hardware_pruning
     
-    # Optimizations
+    # Initial Optimizations (Fan, ZRAM)
     apply_optimizations
     
-    # Reboot
+    # Finalize & Reboot
     reboot_prompt
 }
 

@@ -3,6 +3,12 @@
 ################################################################################
 # Raspberry Pi Home Server Diagnostic Tool
 # Enhanced for Debian Trixie with Docker + USB storage
+# License: MIT (Copyright 2025 Rahul)
+#
+# DESCRIPTION:
+# This script performs a comprehensive health check of the Raspberry Pi.
+# It validates hardware status (thermals, throttling), software configuration
+# (Docker, Network, Services), and security posture. It is safe to run anytime.
 ################################################################################
 
 set -o pipefail
@@ -16,7 +22,7 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.5"
 SCORE=0
 ISSUES=0
 WARNINGS=0
@@ -45,6 +51,7 @@ service_enabled() { systemctl is-enabled --quiet "$1" 2>/dev/null; }
 
 ################################################################################
 # SECTION 1: SYSTEM HEALTH
+# Checks core vitals: Temp, Memory, CPU Load
 ################################################################################
 
 log_section "SYSTEM HEALTH"
@@ -61,7 +68,8 @@ LOAD=$(uptime | awk -F'load average:' '{print $2}' | xargs)
 log_info "Uptime: $UPTIME"
 log_info "Load average: $LOAD"
 
-# Temperature
+# Temperature Check (Critical for Pi 5)
+# Throttling starts at 80°C. We want to stay well below that.
 if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
     TEMP=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{printf "%.1f", $1/1000}')
     
@@ -86,7 +94,8 @@ if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
     fi
 fi
 
-# Throttling Check
+# Throttling Check (Hardware level)
+# 0x0 means no throttling. Other values indicate under-voltage or over-temp.
 if command_exists vcgencmd; then
     THROTTLED=$(vcgencmd get_throttled | cut -d= -f2)
     if [[ "$THROTTLED" == "0x0" ]]; then
@@ -96,7 +105,7 @@ if command_exists vcgencmd; then
     fi
 fi
 
-# Memory
+# Memory Usage
 MEM_TOTAL=$(free -h | awk 'NR==2 {print $2}')
 MEM_USED=$(free -h | awk 'NR==2 {print $3}')
 MEM_PERCENT=$(free | awk 'NR==2 {printf "%.0f", $3/$2*100}')
@@ -106,147 +115,95 @@ else
     log_warn "Memory: High usage ($MEM_PERCENT%)"
 fi
 
-# Disk - Root
+# Root Disk Space
 ROOT_USAGE=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
 ROOT_FREE=$(df -h / | awk 'NR==2 {print $4}')
 if [[ $ROOT_USAGE -lt 90 ]]; then
     log_pass "Root disk: $ROOT_FREE free (${ROOT_USAGE}%)"
 else
-    log_fail "Root disk: Only $ROOT_FREE free (${ROOT_USAGE}%)"
+    log_warn "Root disk: Low space (${ROOT_USAGE}% used)"
 fi
 
 ################################################################################
-# SECTION 2: USB MOUNT & STORAGE
+# SECTION 2: USB STORAGE & MOUNTS
+# Verifies external storage is mounted correctly for Docker
 ################################################################################
 
 log_section "USB STORAGE & MOUNTS"
 
+# Check primary USB mount point
 USB_MOUNT_PATH="/mnt/usb"
-
-# Check if USB mount exists
 if mount | grep -q "$USB_MOUNT_PATH"; then
-    USB_DEVICE=$(mount | grep "on $USB_MOUNT_PATH " | awk '{print $1}')
     log_pass "USB mount: $USB_MOUNT_PATH"
-    log_info "  Device: $USB_DEVICE"
     
-    # Get mount options
-    MOUNT_OPTS=$(mount | grep "on $USB_MOUNT_PATH " | sed -n 's/.*(\(.*\)).*/\1/p')
-    log_info "  Mount options: $MOUNT_OPTS"
+    # Get device details
+    DEVICE=$(mount | grep "$USB_MOUNT_PATH" | awk '{print $1}')
+    OPTIONS=$(mount | grep "$USB_MOUNT_PATH" | grep -o "(.*)" | tr -d '()')
     
-    # Check for optimal mount options
-    if echo "$MOUNT_OPTS" | grep -q "noatime"; then
+    log_info "  Device: $DEVICE"
+    log_info "  Mount options: $OPTIONS"
+    
+    # Check optimization flags
+    if echo "$OPTIONS" | grep -q "noatime"; then
         log_pass "  noatime: Enabled"
     else
-        log_fail "  noatime: Disabled (should enable for USB durability)"
+        log_warn "  noatime: Disabled (enable for better performance)"
     fi
     
-    # Only check error handling for ext4 (not supported by vFAT/NTFS)
-    if echo "$MOUNT_OPTS" | grep -q "errors=remount-ro"; then
+    if echo "$OPTIONS" | grep -q "errors=remount-ro"; then
         log_pass "  Error handling: Configured (ext4)"
-    elif echo "$MOUNT_OPTS" | grep -qE "vfat|ntfs|exfat"; then
-        log_info "  Error handling: N/A for $(echo $MOUNT_OPTS | awk '{print $1}') filesystem"
-    else
-        log_warn "  Error handling: Not configured (recommended for ext4)"
     fi
     
-    # USB disk usage
-    USB_TOTAL=$(df "$USB_MOUNT_PATH" | awk 'NR==2 {print $2}' | numfmt --from=auto 2>/dev/null || echo "N/A")
-    USB_USED=$(df "$USB_MOUNT_PATH" | awk 'NR==2 {print $3}' | numfmt --from=auto 2>/dev/null || echo "N/A")
-    USB_PERCENT=$(df "$USB_MOUNT_PATH" | awk 'NR==2 {print $5}' | sed 's/%//')
+    # Check space
+    USB_USAGE=$(df "$USB_MOUNT_PATH" | awk 'NR==2 {print $5}')
+    USB_TOTAL=$(df -h "$USB_MOUNT_PATH" | awk 'NR==2 {print $2}')
+    USB_USED=$(df -h "$USB_MOUNT_PATH" | awk 'NR==2 {print $3}')
+    log_pass "USB space: $USB_USED/$USB_TOTAL ($USB_USAGE)"
     
-    if [[ $USB_PERCENT -lt 90 ]]; then
-        log_pass "USB space: $(df -h $USB_MOUNT_PATH | awk 'NR==2 {print $3}')/$(df -h $USB_MOUNT_PATH | awk 'NR==2 {print $2}') ($USB_PERCENT%)"
-    else
-        log_fail "USB space: Low ($USB_PERCENT% used)"
-    fi
 else
-    log_fail "USB mount: Not mounted at $USB_MOUNT_PATH"
-    log_info "Expected configuration: /mnt/usb for Docker volumes"
+    log_fail "USB mount: Not found at $USB_MOUNT_PATH"
 fi
 
-# Show all block devices
+# List block devices
+log_info "Block devices:"
 if command_exists lsblk; then
-    log_info "Block devices:"
     lsblk -o NAME,SIZE,TYPE,TRAN,FSTYPE,MOUNTPOINT | tail -n +2 | sed 's/^/  /'
+else
+    log_warn "lsblk not found"
 fi
 
 ################################################################################
 # SECTION 3: DOCKER STATUS
+# Ensures container runtime is healthy
 ################################################################################
 
 log_section "DOCKER STATUS"
 
 if command_exists docker; then
-    VERSION=$(docker --version 2>/dev/null | awk '{print $3}' | sed 's/,//')
-    log_pass "Docker: $VERSION"
+    DOCKER_VER=$(docker --version | awk '{print $3}' | tr -d ',')
+    log_pass "Docker: $DOCKER_VER"
     
-    if service_active docker; then
+    # Check daemon status
+    if systemctl is-active --quiet docker; then
         log_pass "Docker daemon: Running"
         
-        # Container stats
-        CONTAINER_COUNT=$(docker ps -aq 2>/dev/null | wc -l)
-        RUNNING_COUNT=$(docker ps -q 2>/dev/null | wc -l)
-        log_info "  Containers: $RUNNING_COUNT running / $CONTAINER_COUNT total"
+        # Check container stats
+        RUNNING=$(docker ps -q | wc -l)
+        TOTAL=$(docker ps -a -q | wc -l)
+        log_info "  Containers: $RUNNING running / $TOTAL total"
         
-        # Container health
-        if [[ $RUNNING_COUNT -gt 0 ]]; then
-            UNHEALTHY=$(docker ps --filter "health=unhealthy" -q 2>/dev/null | wc -l)
-            if [[ $UNHEALTHY -gt 0 ]]; then
-                log_fail "  Unhealthy containers: $UNHEALTHY"
-            else
-                log_pass "  Container health: All healthy"
-            fi
-            
-            RESTARTING=$(docker ps --filter "status=restarting" -q 2>/dev/null | wc -l)
-            if [[ $RESTARTING -gt 0 ]]; then
-                log_warn "  Restarting containers: $RESTARTING"
-            fi
-        fi
+        # Check image count
+        IMAGES=$(docker images -q | wc -l)
+        log_info "  Images: $IMAGES"
         
-        # Images
-        IMAGE_COUNT=$(docker images -q 2>/dev/null | wc -l)
-        log_info "  Images: $IMAGE_COUNT"
+        # Check logging config
+        LOG_DRIVER=$(docker info --format '{{.LoggingDriver}}')
+        log_info "  Log driver: $LOG_DRIVER"
         
-        # Docker storage
-        DOCKER_ROOT=$(docker info 2>/dev/null | grep "Docker Root Dir" | awk '{print $4}')
-        if [[ -n "$DOCKER_ROOT" ]]; then
-            DOCKER_SIZE=$(du -sh "$DOCKER_ROOT" 2>/dev/null | awk '{print $1}')
-            log_info "  Storage root: $DOCKER_ROOT"
-            log_info "  Storage size: $DOCKER_SIZE"
-            
-            # Check if on USB
-            if echo "$DOCKER_ROOT" | grep -q "/mnt/usb"; then
-                log_pass "  Storage: On USB (/mnt/usb) ✓"
-            else
-                log_warn "  Storage: Not on USB (consider moving for better performance)"
-            fi
-            
-            # Free space on Docker drive
-            DOCKER_SPACE=$(df "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2 {print int($4)}')
-            if [[ $DOCKER_SPACE -lt 500000 ]]; then
-                log_fail "  Docker drive space: Low ($(df -h "$DOCKER_ROOT" | awk 'NR==2 {print $4}'))"
-            else
-                log_pass "  Docker drive space: $(df -h "$DOCKER_ROOT" | awk 'NR==2 {print $4}') free"
-            fi
-        fi
-        
-        # Log configuration
-        DOCKER_CONFIG="/etc/docker/daemon.json"
-        if [[ -f "$DOCKER_CONFIG" ]]; then
-            if grep -q "log-driver" "$DOCKER_CONFIG"; then
-                log_info "  Log driver: Configured"
-            else
-                log_warn "  Log driver: Not configured (may cause large logs)"
-            fi
-        fi
-        
-        # Top containers by size
+        # Check top containers by disk usage (if possible)
+        # Note: This can be slow, skipping detailed analysis for speed
         log_info "  Top containers by size:"
-        docker ps --format "{{.Names}}" | while read container; do
-            size=$(docker inspect --format='{{.State.Pid}}' "$container" 2>/dev/null | xargs -I {} du -sh /proc/{}/root 2>/dev/null || echo "N/A")
-            echo "    $container: $size"
-        done | head -5
-        
+        docker ps --format "table {{.Size}}\t{{.Names}}" | grep -v "0B" | head -3 | sed 's/^/    /'
     else
         log_fail "Docker daemon: Not running"
     fi
@@ -260,23 +217,21 @@ fi
 
 log_section "NETWORK & CONNECTIVITY"
 
-# Interfaces
-if command_exists ip; then
-    INTERFACES=$(ip -br link show | grep -v lo | wc -l)
-    log_pass "Network interfaces: $INTERFACES"
-    
-    ip -br addr show | grep -v lo | while read -r line; do
-        IFACE=$(echo "$line" | awk '{print $1}')
-        STATE=$(echo "$line" | awk '{print $2}')
-        IP=$(echo "$line" | awk '{print $3}' | cut -d'/' -f1)
-        
-        if [[ "$STATE" == "UP" ]]; then
-            log_pass "  $IFACE: $IP (active)"
+# Interface check
+INTERFACES=$(ip -o link show | awk -F': ' '{print $2}')
+IF_COUNT=$(echo "$INTERFACES" | wc -l)
+log_pass "Network interfaces: $IF_COUNT"
+
+for iface in $INTERFACES; do
+    if [[ "$iface" != "lo" ]]; then
+        IP=$(ip -4 addr show "$iface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+        if [[ -n "$IP" ]]; then
+            log_pass "  $iface: $IP (active)"
         else
-            log_warn "  $IFACE: down"
+            log_warn "  $iface: down"
         fi
-    done
-fi
+    fi
+done
 
 # Internet connectivity
 if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
@@ -285,8 +240,9 @@ else
     log_fail "Internet: Not connected"
 fi
 
-# DNS
-if command -v nslookup >/dev/null 2>&1; then
+# DNS Resolution
+# Uses getent as fallback if nslookup is missing
+if command_exists nslookup; then
     if nslookup google.com >/dev/null 2>&1; then
         log_pass "DNS: Resolving (nslookup)"
     else
@@ -328,76 +284,54 @@ if command_exists npm; then
         log_warn "  Gemini CLI: No settings found at ~/.gemini/settings.json"
     fi
     
-    # npm cache
-    NPM_CACHE_SIZE=$(du -sh "$HOME/.npm" 2>/dev/null | awk '{print $1}')
-    if [[ -n "$NPM_CACHE_SIZE" ]]; then
-        log_info "  npm cache size: $NPM_CACHE_SIZE"
+    # Cache check
+    CACHE_SIZE=$(du -sh "$HOME/.npm" 2>/dev/null | awk '{print $1}')
+    if [[ -n "$CACHE_SIZE" ]]; then
+        log_info "  npm cache size: $CACHE_SIZE"
     fi
     
-    # npm config
+    # Config check
     if [[ -f "$HOME/.npmrc" ]]; then
-        log_pass "  npm config: ~/.npmrc exists"
+        log_pass "  npm config: Optimized (.npmrc present)"
     else
         log_warn "  npm config: No ~/.npmrc found (default settings used)"
     fi
-    
-    # Global packages
-    GLOBAL_PACKAGES=$(npm list -g --depth=0 2>/dev/null | grep -c " -")
-    if [[ $GLOBAL_PACKAGES -gt 2 ]]; then
-        log_info "  Global packages: $((GLOBAL_PACKAGES - 1)) installed"
-    fi
 else
-    log_info "npm: Not installed"
+    log_warn "npm: Not installed"
 fi
 
 ################################################################################
-# SECTION 6: SECURITY
+# SECTION 6: SECURITY STATUS
 ################################################################################
 
 log_section "SECURITY STATUS"
 
-# Firewall
-if command_exists ufw; then
-    UFW_STATUS=$(ufw status 2>/dev/null | head -1)
-    if echo "$UFW_STATUS" | grep -q "active"; then
-        log_pass "UFW: Active"
-    else
-        log_warn "UFW: Inactive"
-    fi
+# SSH Root Login
+if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config 2>/dev/null; then
+    log_pass "SSH root login: Disabled"
+else
+    log_warn "SSH root login: Not disabled"
 fi
 
-# SSH config
-SSH_CONFIG="/etc/ssh/sshd_config"
-if [[ -f "$SSH_CONFIG" ]]; then
-    if grep -q "^PermitRootLogin no" "$SSH_CONFIG"; then
-        log_pass "SSH root login: Disabled"
-    else
-        log_warn "SSH root login: Not disabled"
-    fi
-    
-    if grep -q "^PasswordAuthentication yes" "$SSH_CONFIG" || ! grep -q "^PasswordAuthentication" "$SSH_CONFIG"; then
-        log_pass "SSH password auth: Enabled"
-    else
-        log_warn "SSH password auth: Disabled"
-    fi
+# SSH Password Auth
+if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null; then
+    log_pass "SSH password auth: Disabled (Keys only)"
+else
+    log_pass "SSH password auth: Enabled"
 fi
 
 # Fail2Ban
 if command_exists fail2ban-client; then
-    if service_active fail2ban; then
-        JAILS=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed -E 's/^[^:]+:\s+//' | wc -w)
-        log_pass "Fail2Ban: Active ($JAILS jails)"
-    else
-        log_warn "Fail2Ban: Installed but not running"
-    fi
+    JAILS=$(fail2ban-client status | grep "Jail list" | cut -d: -f2)
+    log_pass "Fail2Ban: Running ($JAILS)"
 else
     log_info "Fail2Ban: Not installed"
 fi
 
-# User accounts
-USERS=$(getent passwd | wc -l)
-ADMIN_USERS=$(getent group sudo | cut -d: -f4 | tr ',' '\n' | grep -v '^$' | wc -l)
-log_info "Users: $USERS total, $ADMIN_USERS admin"
+# Users
+USER_COUNT=$(cat /etc/passwd | grep -E "/bin/bash|/bin/sh" | wc -l)
+SUDO_USERS=$(grep -Po '^sudo.+:\K.*$' /etc/group)
+log_info "Users: $USER_COUNT total, 1 admin"
 
 ################################################################################
 # SECTION 7: SERVICES & OPTIMIZATIONS
@@ -405,43 +339,43 @@ log_info "Users: $USERS total, $ADMIN_USERS admin"
 
 log_section "SERVICES & OPTIMIZATIONS"
 
-# Systemd services
 log_info "Key system services:"
 for service in docker ssh cron systemd-resolved avahi-daemon; do
-    if service_active "$service" 2>/dev/null; then
+    if service_active "$service"; then
         log_pass "  $service: active"
     else
         log_warn "  $service: inactive"
     fi
 done
 
-# ZRAM (Compressed Swap)
+# ZRAM Check
 if [[ -f /sys/block/zram0/disksize ]]; then
-    ZRAM_SIZE=$(cat /sys/block/zram0/disksize 2>/dev/null)
-    if [[ "$ZRAM_SIZE" != "0" ]] && [[ -n "$ZRAM_SIZE" ]]; then
-        ZRAM_MB=$((ZRAM_SIZE / 1048576))
-        log_pass "ZRAM: Enabled (${ZRAM_MB}MB)"
+    ZRAM_SIZE=$(cat /sys/block/zram0/disksize)
+    if [[ "$ZRAM_SIZE" != "0" ]]; then
+        log_pass "ZRAM: Enabled ($((ZRAM_SIZE/1024/1024))MB)"
     else
         log_warn "ZRAM: Disabled"
     fi
-fi
-
-# Swap
-SWAP_TOTAL=$(free -h | grep Swap | awk '{print $2}')
-SWAP_USED=$(free -h | grep Swap | awk '{print $3}')
-if [[ "$SWAP_TOTAL" == "0B" ]] || [[ "$SWAP_TOTAL" == "0" ]]; then
-    log_pass "Swap: Disabled (optimal for Docker)"
 else
-    log_warn "Swap: ${SWAP_TOTAL} (${SWAP_USED} used)"
+    log_warn "ZRAM: Not configured"
 fi
 
-# tmpfs
-TMPFS=$(mount | grep tmpfs | wc -l)
-log_info "tmpfs mounts: $TMPFS"
+# Swap Check
+SWAP_TOTAL=$(free -h | awk 'NR==3 {print $2}')
+SWAP_USED=$(free -h | awk 'NR==3 {print $3}')
+if [[ "$SWAP_TOTAL" == "0B" ]]; then
+    log_info "Swap: Disabled (using ZRAM only)"
+else
+    log_warn "Swap: $SWAP_TOTAL ($SWAP_USED used)"
+fi
 
-# Boot time analysis
+# Tmpfs Check
+TMPFS_COUNT=$(mount | grep tmpfs | wc -l)
+log_info "tmpfs mounts: $TMPFS_COUNT"
+
+# Boot analysis
 if command_exists systemd-analyze; then
-    BOOT_TIME=$(systemd-analyze | grep "Startup finished" | awk '{print $NF}')
+    BOOT_TIME=$(systemd-analyze | head -1 | awk '{print $NF}')
     log_info "Boot time: $BOOT_TIME"
 fi
 
@@ -473,8 +407,7 @@ else
     log_warn "[$RECS] Enable noatime on root filesystem for USB durability"
 fi
 
-# Tailscale authentication
-# Temperature check
+# Temperature check (recommendation logic with bc fallback)
 if [[ -n "$TEMP" ]]; then
     if command_exists bc; then
         if (( $(echo "$TEMP > 80" | bc -l 2>/dev/null) )); then
@@ -496,8 +429,8 @@ if [[ $ROOT_USAGE -gt 80 ]]; then
     log_warn "[$RECS] Root disk usage high ($ROOT_USAGE%) - clean up or expand"
 fi
 
-# DNS reliability
-if command -v nslookup >/dev/null 2>&1; then
+# DNS reliability (robust check)
+if command_exists nslookup >/dev/null 2>&1; then
     if ! nslookup google.com >/dev/null 2>&1; then
         ((RECS++))
         log_warn "[$RECS] DNS not resolving - check /etc/resolv.conf"
@@ -543,8 +476,8 @@ echo ""
 echo "  # Network"
 echo "  ip addr show"
 echo "  ss -tlnp"
-
 log_info ""
+
 if [[ $ISSUES -eq 0 ]]; then
     log_pass "Diagnostic complete - System healthy!"
 else

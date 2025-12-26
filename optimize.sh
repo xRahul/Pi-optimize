@@ -4,6 +4,13 @@
 # Raspberry Pi Home Server Optimization
 # Target: Debian Trixie with Docker + USB storage
 # Optimizes for: Low writes, thermal management, Docker performance
+# License: MIT (Copyright 2025 Rahul)
+#
+# DESCRIPTION:
+# This script applies aggressive optimizations to tune the Raspberry Pi 5
+# for server workloads. It enables features like TCP BBR, ZRAM, and hardware
+# watchdog, while minimizing flash storage wear via commit intervals and
+# noatime settings.
 ################################################################################
 
 set -o pipefail
@@ -16,7 +23,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.5"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -54,19 +61,6 @@ backup_file() {
     if [[ -f "$file" ]]; then
         cp "$file" "${file}.backup.${BACKUP_TIMESTAMP}"
         log_pass "Backed up: $file"
-    fi
-}
-
-apply_sysctl() {
-    local key="$1"
-    local value="$2"
-    
-    if grep -q "^$key" /etc/sysctl.d/99-rpi-optimize.conf 2>/dev/null; then
-        log_skip "$key: Already configured"
-    else
-        echo "$key = $value" >> /etc/sysctl.d/99-rpi-optimize.conf
-        sysctl -w "$key=$value" >/dev/null 2>&1
-        log_pass "$key: Set to $value"
     fi
 }
 
@@ -108,6 +102,7 @@ EOF
 
 ################################################################################
 # SECTION 1b: HARDWARE WATCHDOG
+# Ensures system reboots if it freezes/crashes.
 ################################################################################
 
 watchdog_configuration() {
@@ -180,13 +175,14 @@ usb_write_optimization() {
     
     log_info "Optimizing root filesystem for USB longevity..."
     
-    # Check current fstab
+    # Check current fstab for noatime on root (match various separators)
     if grep -q "[[:space:]]/[[:space:]].*noatime" /etc/fstab; then
         log_skip "Root filesystem already optimized"
     else
         # Backup and update root entry
         cp /etc/fstab /etc/fstab.orig
-        sed -i 's|^\([^#]*[[:space:]]\+/[[:space:]]\+[^[:space:]]\+[[:space:]]\+\)\([^[:space:]]\+\)|\1\2,noatime|' /etc/fstab
+        # Use robust regex to handle PARTUUID and tabs/spaces
+        sed -i 's|^\[^#\]*[[:space:]]\+/[[:space:]]\+[^[:space:]]\+[[:space:]]\+\)\(.*\)|\1\2,noatime|' /etc/fstab
         log_pass "Root filesystem: noatime enabled"
     fi
     
@@ -203,13 +199,13 @@ usb_write_optimization() {
             case "$usb_fstype" in
                 ext4)
                     log_info "Note: /mnt/usb (ext4) should have: defaults,nofail,noatime,errors=remount-ro"
-                    ;;
+                    ;;;;
                 vfat|ntfs|exfat)
                     log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;
+                    ;;;;
                 *)
                     log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;
+                    ;;;;
             esac
             log_info "      Edit /etc/fstab and remount: sudo mount -o remount /mnt/usb"
         fi
@@ -270,13 +266,14 @@ EOF
         log_info "Docker daemon.json exists - verify settings"
     fi
     
-    # Optimize Docker service
+    # Optimize Docker service (Systemd override)
     mkdir -p /etc/systemd/system/docker.service.d
     local override_file="/etc/systemd/system/docker.service.d/override.conf"
     
     local mount_dep=""
     if grep -q "/mnt/usb" "$DOCKER_CONFIG" 2>/dev/null; then
         mount_dep="RequiresMountsFor=/mnt/usb"
+        log_info "Adding Docker dependency on USB mount"
     fi
     
     if [[ ! -f "$override_file" ]]; then
@@ -313,6 +310,8 @@ EOF
 
 ################################################################################
 # SECTION 4: MEMORY OPTIMIZATION (ZRAM)
+# Creates a compressed block device in RAM to use as swap.
+# Significantly faster than disk swap and saves SD card wear.
 ################################################################################
 
 memory_optimization() {
@@ -351,6 +350,7 @@ EOF
 
 ################################################################################
 # SECTION 5: LOG MANAGEMENT
+# Reduces disk writes by storing logs in RAM (volatile).
 ################################################################################
 
 log_management() {
@@ -399,6 +399,8 @@ EOF
 
 ################################################################################
 # SECTION 6: IO SCHEDULER OPTIMIZATION
+# Uses BFQ scheduler which is optimized for responsiveness and throughput
+# on slower storage devices like USB/SD.
 ################################################################################
 
 io_scheduler_optimization() {
@@ -466,6 +468,7 @@ EOF
 
 ################################################################################
 # SECTION 7: KERNEL PARAMETERS
+# Tunes the Linux kernel for network performance (BBR) and memory management.
 ################################################################################
 
 kernel_tuning() {
@@ -577,6 +580,7 @@ network_optimization() {
 
 ################################################################################
 # SECTION 9b: SYSTEM CLEANUP
+# Removes unnecessary packages to save space and reduce attack surface.
 ################################################################################
 
 system_cleanup() {
@@ -643,7 +647,7 @@ cache_clearing() {
     
     # Clear systemd journal if too large
     log_info "Optimizing systemd journal..."
-    journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*M\|[0-9.]*G' | head -1 | while read size; do
+    journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*M|[0-9.]*G' | head -1 | while read size; do
         if [[ -n "$size" ]]; then
             log_info "  Current journal size: $size"
         fi

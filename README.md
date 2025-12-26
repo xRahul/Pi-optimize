@@ -52,9 +52,10 @@ This suite applies specific kernel and system tuning. Here is the detailed ratio
 ## 📋 Quick Start
 
 ### Prerequisites
-1.  **Hardware**: Raspberry Pi 5.
-2.  **OS**: Raspberry Pi OS Lite (Debian Trixie).
+1.  **Hardware**: Raspberry Pi 5 (The scripts tune specific thermal/hardware settings for Pi 5).
+2.  **OS**: Raspberry Pi OS Lite (Debian Trixie). Fresh install recommended.
 3.  **Storage**: External USB 3.0 SSD/HDD connected.
+    *   *Note*: USB 2.0 is too slow for Docker. Use the blue ports.
 4.  **Install Git**: `sudo apt update && sudo apt install -y git`
 
 ### Installation
@@ -86,7 +87,7 @@ Sets up the environment from scratch.
 *   **USB Handling**:
     *   Checks if the USB drive is formatted.
     *   **Feature**: Offers to auto-format to `ext4` if undefined (Crucial for Docker).
-    *   Mounts to `/mnt/usb` and configures `/etc/fstab` for boot persistence.
+    *   Mounts to `/mnt/usb` and configures `/etc/fstab` for boot persistence using **UUIDs** (preventing mount failures if USB ports change).
 *   **Software Stack**:
     *   **Docker**: Installs official Docker CE.
     *   **Node.js**: Installs LTS version from NodeSource.
@@ -98,6 +99,7 @@ Applies the "Deep Dive" configurations.
 *   **Services**: Enables `watchdog` service and `zram`.
 *   **Docker**: Edits `systemd` override to ensure `dockerd` starts **after** `/mnt/usb` is mounted (`RequiresMountsFor=/mnt/usb`).
 *   **Cleanup**: Purges `triggerhappy` (hotkey daemon, useless on server), `modemmanager` (interferes with serial), and docs.
+*   **Thermals**: Configures aggressive fan curves to keep Pi 5 cool (starts fan at 35°C).
 
 ### 3. `diag.sh` (The Verification)
 A read-only auditor.
@@ -108,31 +110,31 @@ A read-only auditor.
 
 ## 🔍 Verification & Troubleshooting
 
-**Verify BBR is active:**
+### Why is Docker running on SD card instead of USB?
+If your USB drive is formatted as FAT32 (vfat) or exFAT, `setup.sh` intentionally forces Docker to use the SD card.
+*   **Reason**: Docker *cannot* run reliably on FAT filesystems (no permissions/symlinks/overlayfs support).
+*   **Fix**: Run `setup.sh` again and choose "Yes" when asked to format the USB drive to **ext4**.
+
+### How do I know BBR is working?
 ```bash
 sysctl net.ipv4.tcp_congestion_control
 # Output should be: bbr
 ```
 
-**Verify Watchdog is active:**
+### Is the Watchdog active?
 ```bash
 systemctl status watchdog
 # Status should be: active (running)
 ```
+*   **Test it**: (Warning: This will reboot your Pi!) `sudo kill -9 $(pidof watchdog)` is safe, but to test the *hardware* reboot, you'd need to freeze the kernel (fork bomb), which is risky. Just trust the service status.
 
-**Verify Gemini CLI Config:**
+### Verify Gemini CLI Config
 ```bash
 cat ~/.gemini/settings.json
 # Should show: "previewFeatures": true
 ```
 
-**Verify Docker Storage:**
-```bash
-docker info | grep "Docker Root Dir"
-# Should be: /mnt/usb/docker
-```
-
 ---
 
 ## 📜 License
-Provided as-is. Optimizations are tailored for Raspberry Pi 5 hardware but generally applicable to Debian-based ARM64 systems.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
