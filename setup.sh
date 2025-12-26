@@ -267,6 +267,18 @@ docker_setup() {
     else
         log_error "Docker service failed to start"
     fi
+
+    # Add user to docker group
+    local target_user="${SUDO_USER:-$USER}"
+    if [[ "$target_user" != "root" ]]; then
+        log_info "Adding user $target_user to docker group..."
+        if getent group docker >/dev/null; then
+             usermod -aG docker "$target_user"
+             log_pass "User $target_user added to docker group (requires logout/login)"
+        else
+             log_warn "Docker group does not exist"
+        fi
+    fi
     
     # Verify Docker functionality
     log_info "Testing Docker functionality..."
@@ -347,13 +359,47 @@ nodejs_setup() {
         apt install -y nodejs || log_error "Failed to install Node.js"
         log_pass "Node.js installed: $(node -v)"
     fi
-    
-    # Install and Configure Gemini CLI
+
+    # Configure npm for non-root user
     local target_user="${SUDO_USER:-$USER}"
+    if [[ "$target_user" == "root" ]]; then
+        log_warn "Running as root without SUDO_USER. Skipping user-specific npm config."
+        return
+    fi
+    
     local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    local npm_global_dir="$target_home/.npm-global"
     local gemini_dir="$target_home/.gemini"
     
-    log_info "Configuring Gemini CLI for $target_user..."
+    log_info "Configuring npm for user: $target_user"
+    
+    # 1. Create global directory
+    mkdir -p "$npm_global_dir"
+    chown -R "$target_user:$target_user" "$npm_global_dir"
+    
+    # 2. Configure npm prefix
+    sudo -u "$target_user" npm config set prefix "$npm_global_dir"
+    log_pass "npm prefix set to $npm_global_dir"
+    
+    # 3. Update PATH in .bashrc
+    if ! grep -q ".npm-global/bin" "$target_home/.bashrc"; then
+        echo "" >> "$target_home/.bashrc"
+        echo "# npm global binaries" >> "$target_home/.bashrc"
+        echo 'export PATH=~/.npm-global/bin:$PATH' >> "$target_home/.bashrc"
+        log_pass "Added ~/.npm-global/bin to .bashrc"
+    else
+        log_info "PATH already configured in .bashrc"
+    fi
+    
+    # 4. Install Gemini CLI as user
+    log_info "Installing @google/gemini-cli..."
+    if sudo -u "$target_user" PATH="$npm_global_dir/bin:$PATH" npm install -g @google/gemini-cli; then
+        log_pass "Gemini CLI installed successfully"
+    else
+        log_warn "Failed to install Gemini CLI"
+    fi
+    
+    log_info "Configuring Gemini CLI settings..."
     
     # Create configuration with Preview Features enabled (if not exists)
     mkdir -p "$gemini_dir"
@@ -370,10 +416,8 @@ EOF
         log_info "Gemini settings already exist"
     fi
     
-    # Set permissions for the user (since we are running as root)
-    if [[ -n "$SUDO_USER" ]]; then
-        chown -R "$target_user:$target_user" "$gemini_dir"
-    fi
+    # Set permissions for the user
+    chown -R "$target_user:$target_user" "$gemini_dir"
 }
 
 ################################################################################
@@ -683,9 +727,19 @@ reboot_prompt() {
     
     log_info ""
     log_info "Summary:"
-    log_info "  Checks passed: $CHECKS_PASSED"
-    log_info "  Issues found: $CHECKS_FAILED"
-    log_info "  Warnings: $WARNINGS"
+    log_pass "  Checks passed: $CHECKS_PASSED"
+    
+    if [[ $CHECKS_FAILED -gt 0 ]]; then
+        log_fail "  Issues found: $CHECKS_FAILED"
+    else
+        log_info "  Issues found: $CHECKS_FAILED"
+    fi
+    
+    if [[ $WARNINGS -gt 0 ]]; then
+        log_warn "  Warnings: $WARNINGS"
+    else
+        log_info "  Warnings: $WARNINGS"
+    fi
     
     log_info ""
     log_info "Next steps:"

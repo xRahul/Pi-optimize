@@ -200,6 +200,15 @@ if command_exists docker; then
         LOG_DRIVER=$(docker info --format '{{.LoggingDriver}}')
         log_info "  Log driver: $LOG_DRIVER"
         
+        # Check user permissions (sudo-less docker)
+        if [[ -n "$SUDO_USER" ]]; then
+            if groups "$SUDO_USER" | grep -q "\bdocker\b"; then
+                log_pass "  User permissions: $SUDO_USER in docker group"
+            else
+                log_warn "  User permissions: $SUDO_USER NOT in docker group (needs sudo)"
+            fi
+        fi
+        
         # Check top containers by disk usage (if possible)
         # Note: This can be slow, skipping detailed analysis for speed
         log_info "  Top containers by size:"
@@ -276,25 +285,38 @@ if command_exists npm; then
         log_info "  Node.js: $NODE_VERSION"
     fi
     
+    # Check global install prefix (for sudo-less installs)
+    if [[ -n "$SUDO_USER" ]]; then
+        USER_PREFIX=$(sudo -u "$SUDO_USER" npm config get prefix 2>/dev/null)
+        if [[ "$USER_PREFIX" == *".npm-global" ]]; then
+            log_pass "  npm prefix: User-local ($USER_PREFIX)"
+        else
+            log_warn "  npm prefix: System default ($USER_PREFIX) - may require sudo"
+        fi
+    fi
+    
     # Gemini CLI Check
-    if [[ -f "$HOME/.gemini/settings.json" ]]; then
-        PREVIEW=$(grep "previewFeatures" "$HOME/.gemini/settings.json" | grep -q "true" && echo "Enabled" || echo "Disabled")
+    local target_user="${SUDO_USER:-$USER}"
+    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    
+    if [[ -f "$target_home/.gemini/settings.json" ]]; then
+        PREVIEW=$(grep "previewFeatures" "$target_home/.gemini/settings.json" | grep -q "true" && echo "Enabled" || echo "Disabled")
         log_pass "  Gemini CLI: Configured (Preview: $PREVIEW)"
     else
-        log_warn "  Gemini CLI: No settings found at ~/.gemini/settings.json"
+        log_warn "  Gemini CLI: No settings found at $target_home/.gemini/settings.json"
     fi
     
     # Cache check
-    CACHE_SIZE=$(du -sh "$HOME/.npm" 2>/dev/null | awk '{print $1}')
+    CACHE_SIZE=$(du -sh "$target_home/.npm" 2>/dev/null | awk '{print $1}')
     if [[ -n "$CACHE_SIZE" ]]; then
         log_info "  npm cache size: $CACHE_SIZE"
     fi
     
     # Config check
-    if [[ -f "$HOME/.npmrc" ]]; then
+    if [[ -f "$target_home/.npmrc" ]]; then
         log_pass "  npm config: Optimized (.npmrc present)"
     else
-        log_warn "  npm config: No ~/.npmrc found (default settings used)"
+        log_warn "  npm config: No $target_home/.npmrc found (default settings used)"
     fi
 else
     log_warn "npm: Not installed"
@@ -451,8 +473,18 @@ fi
 log_section "DIAGNOSTIC SUMMARY"
 
 log_info "Readiness Score: $SCORE"
-log_info "Issues Found: $ISSUES"
-log_info "Warnings: $WARNINGS"
+
+if [[ $ISSUES -gt 0 ]]; then
+    log_fail "Issues Found: $ISSUES"
+else
+    log_info "Issues Found: $ISSUES"
+fi
+
+if [[ $WARNINGS -gt 0 ]]; then
+    log_warn "Warnings Found: $WARNINGS"
+else
+    log_info "Warnings Found: $WARNINGS"
+fi
 
 log_info ""
 log_info "Useful commands:"

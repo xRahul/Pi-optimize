@@ -29,6 +29,7 @@ BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 OPTIMIZATIONS_APPLIED=0
 OPTIMIZATIONS_SKIPPED=0
+WARNINGS=0
 
 ################################################################################
 # Logging Functions
@@ -37,7 +38,7 @@ OPTIMIZATIONS_SKIPPED=0
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_pass() { echo -e "${GREEN}[✓]${NC} $1"; ((OPTIMIZATIONS_APPLIED++)); }
 log_skip() { echo -e "${YELLOW}[⊘]${NC} $1"; ((OPTIMIZATIONS_SKIPPED++)); }
-log_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[!]${NC} $1"; ((WARNINGS++)); }
 log_section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 log_success() { echo -e "\n${GREEN}$1${NC}"; }
 log_error() { echo -e "\n${RED}ERROR: $1${NC}"; exit 1; }
@@ -302,6 +303,18 @@ EOF
         fi
     fi
     
+    # Ensure user is in docker group
+    local target_user="${SUDO_USER:-$USER}"
+    if [[ "$target_user" != "root" ]]; then
+        if ! groups "$target_user" | grep -q "\bdocker\b"; then
+            log_info "Adding user $target_user to docker group..."
+            usermod -aG docker "$target_user"
+            log_pass "User $target_user added to docker group"
+        else
+            log_pass "User $target_user already in docker group"
+        fi
+    fi
+
     # Restart Docker to apply
     log_info "Restarting Docker daemon..."
     systemctl restart docker || log_error "Failed to restart Docker"
@@ -696,6 +709,32 @@ npm_optimization() {
     log_info "Configuring npm for user: $target_user"
     NPM_CONFIG="$target_home/.npmrc"
     
+    # Ensure global prefix is set for non-root users
+    if [[ "$target_user" != "root" ]]; then
+        local npm_global_dir="$target_home/.npm-global"
+        
+        # Check current prefix
+        local current_prefix=$(sudo -u "$target_user" npm config get prefix)
+        
+        if [[ "$current_prefix" != "$npm_global_dir" ]]; then
+            log_info "Setting npm prefix to $npm_global_dir..."
+            mkdir -p "$npm_global_dir"
+            chown "$target_user:$target_user" "$npm_global_dir"
+            sudo -u "$target_user" npm config set prefix "$npm_global_dir"
+            log_pass "npm global prefix updated"
+            
+            # Update PATH in bashrc if needed
+            if ! grep -q ".npm-global/bin" "$target_home/.bashrc"; then
+                echo "" >> "$target_home/.bashrc"
+                echo "# npm global binaries" >> "$target_home/.bashrc"
+                echo 'export PATH=~/.npm-global/bin:$PATH' >> "$target_home/.bashrc"
+                log_pass "Added ~/.npm-global/bin to .bashrc"
+            fi
+        else
+            log_pass "npm global prefix correct ($npm_global_dir)"
+        fi
+    fi
+    
     # Create .npmrc if it doesn't exist
     if [[ ! -f "$NPM_CONFIG" ]]; then
         cat > "$NPM_CONFIG" << 'EOF'
@@ -730,12 +769,12 @@ EOF
     fi
     
     # Clean npm cache
-    npm cache verify 2>/dev/null >/dev/null
+    sudo -u "$target_user" npm cache verify 2>/dev/null >/dev/null
     log_pass "npm cache verified"
     
     # Show npm info
     NPM_VERSION=$(npm --version)
-    NPM_CACHE_SIZE=$(du -sh "$HOME/.npm" 2>/dev/null | awk '{print $1}')
+    NPM_CACHE_SIZE=$(du -sh "$target_home/.npm" 2>/dev/null | awk '{print $1}')
     log_info "npm version: $NPM_VERSION"
     if [[ -n "$NPM_CACHE_SIZE" ]]; then
         log_info "npm cache size: $NPM_CACHE_SIZE"
@@ -789,6 +828,12 @@ summary_and_reboot() {
     
     log_success "✓ Optimizations Applied: $OPTIMIZATIONS_APPLIED"
     log_info "Skipped: $OPTIMIZATIONS_SKIPPED"
+    
+    if [[ $WARNINGS -gt 0 ]]; then
+        log_warn "Warnings: $WARNINGS"
+    else
+        log_info "Warnings: $WARNINGS"
+    fi
     
     log_info ""
     log_info "Applied optimizations:"
