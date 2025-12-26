@@ -296,8 +296,14 @@ if command_exists npm; then
     fi
     
     # Gemini CLI Check
-    local target_user="${SUDO_USER:-$USER}"
-    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    target_user="${SUDO_USER:-$USER}"
+    if command_exists getent; then
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    fi
+    
+    if [[ -z "$target_home" ]]; then
+        target_home="$HOME"
+    fi
     
     if [[ -f "$target_home/.gemini/settings.json" ]]; then
         PREVIEW=$(grep "previewFeatures" "$target_home/.gemini/settings.json" | grep -q "true" && echo "Enabled" || echo "Disabled")

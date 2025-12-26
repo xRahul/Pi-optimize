@@ -573,7 +573,7 @@ usb_mount_setup() {
     if grep -q "$USB_MOUNT_PATH" /etc/fstab; then
         log_warn "Entry already exists in /etc/fstab for $USB_MOUNT_PATH"
         log_info "Removing old entry..."
-        sed -i "|$USB_MOUNT_PATH|d" /etc/fstab
+        sed -i "\|${USB_MOUNT_PATH}|d" /etc/fstab
     fi
     
     # Get UUID for robust mounting (Prevents issues if device letters change)
