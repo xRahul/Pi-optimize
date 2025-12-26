@@ -509,11 +509,21 @@ usb_mount_setup() {
         sed -i "\|$USB_MOUNT_PATH|d" /etc/fstab
     fi
     
+    # Get UUID for robust mounting
+    local uuid=$(blkid -s UUID -o value "$usb_device")
+    local fstab_device="$usb_device"
+    
+    if [[ -n "$uuid" ]]; then
+        fstab_device="UUID=$uuid"
+    else
+        log_warn "Could not get UUID for $usb_device, falling back to device path"
+    fi
+
     cat >> /etc/fstab << EOF
 # External USB drive for Docker volumes and data storage
-$usb_device $USB_MOUNT_PATH $fstype $mount_opts 0 2
+$fstab_device $USB_MOUNT_PATH $fstype $mount_opts 0 2
 EOF
-    log_pass "Added fstab entry for USB device: $usb_device"
+    log_pass "Added fstab entry: $fstab_device"
     
     # Set permissions
     log_info "Setting permissions on $USB_MOUNT_PATH..."
