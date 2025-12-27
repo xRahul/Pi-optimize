@@ -1,56 +1,82 @@
 #!/bin/bash
 
 ################################################################################
-# Raspberry Pi Home Server Optimization
-# Target: Debian Trixie with Docker + USB storage
-# Optimizes for: Low writes, thermal management, Docker performance
+# Raspberry Pi Home Server Optimization - ULTIMATE EDITION v4.1.0
+# Target: Debian Trixie/Bookworm (aarch64)
+# Optimizes for: Performance, Stability, Flash Longevity, Security
 # License: MIT (Copyright 2025 Rahul)
-#
-# DESCRIPTION:
-# This script applies aggressive optimizations to tune the Raspberry Pi 5
-# for server workloads. It enables features like TCP BBR, ZRAM, and hardware
-# watchdog, while minimizing flash storage wear via commit intervals and
-# noatime settings.
 ################################################################################
 
-set -o pipefail
+# --- Strict Mode ---
+set -euo pipefail
 IFS=$'\n\t'
 
+# --- Constants & Environment ---
+SCRIPT_VERSION="4.1.0"
+CONFIG_FILE="/boot/firmware/config.txt"
+BACKUP_DIR="/var/backups/rpi-optimize"
+LOG_FILE="/var/log/rpi-optimize.log"
+LOCK_FILE="/run/rpi-optimize.lock"
+BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-SCRIPT_VERSION="2.5"
-CONFIG_FILE="/boot/firmware/config.txt"
-BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
+# Counters
 OPTIMIZATIONS_APPLIED=0
 OPTIMIZATIONS_SKIPPED=0
 WARNINGS=0
-
-################################################################################
-# Logging Functions
-################################################################################
-
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_pass() { echo -e "${GREEN}[✓]${NC} $1"; ((OPTIMIZATIONS_APPLIED++)); }
-log_skip() { echo -e "${YELLOW}[⊘]${NC} $1"; ((OPTIMIZATIONS_SKIPPED++)); }
-log_warn() { echo -e "${YELLOW}[!]${NC} $1"; ((WARNINGS++)); }
-log_section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
-log_success() { echo -e "\n${GREEN}$1${NC}"; }
-log_error() { echo -e "\n${RED}ERROR: $1${NC}"; exit 1; }
+ERRORS=0
 
 ################################################################################
 # Utility Functions
 ################################################################################
 
+log_info() { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
+log_pass() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_APPLIED++)); }
+log_skip() { echo -e "${YELLOW}[⊘]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_SKIPPED++)); }
+log_warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; ((WARNINGS++)); }
+log_error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; ((ERRORS++)); }
+log_section() { echo -e "\n${CYAN}=== $1 ===${NC}" | tee -a "$LOG_FILE"; }
+log_success() { echo -e "\n${GREEN}$1${NC}" | tee -a "$LOG_FILE"; }
+
+cleanup() {
+    rm -f "$LOCK_FILE"
+}
+
+trap_error() {
+    local line=$1
+    local msg=$2
+    log_error "Error at line $line: $msg"
+    cleanup
+    exit 1
+}
+
+trap 'trap_error ${LINENO} "$BASH_COMMAND"' ERR
+trap cleanup EXIT
+
 require_root() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root (sudo)"
+        echo -e "${RED}ERROR: This script must be run as root (sudo)${NC}"
+        exit 1
     fi
+}
+
+acquire_lock() {
+    if [[ -f "$LOCK_FILE" ]]; then
+        local pid=$(cat "$LOCK_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            log_error "Script is already running (PID: $pid)"
+            exit 1
+        fi
+    fi
+    echo $$ > "$LOCK_FILE"
 }
 
 command_exists() {
@@ -60,34 +86,31 @@ command_exists() {
 backup_file() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        cp "$file" "${file}.backup.${BACKUP_TIMESTAMP}"
-        log_pass "Backed up: $file"
+        mkdir -p "$BACKUP_DIR"
+        local bkp="${BACKUP_DIR}/$(basename "$file").${BACKUP_TIMESTAMP}"
+        cp "$file" "$bkp"
+        log_info "Backup created: $bkp"
     fi
 }
 
 ################################################################################
-# SECTION 1: THERMAL OPTIMIZATION (Pi 5)
+# 1. Hardware & Thermal
 ################################################################################
 
-thermal_optimization() {
-    log_section "THERMAL OPTIMIZATION"
+optimize_hardware() {
+    log_section "HARDWARE & THERMAL"
     
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        log_error "Config file not found: $CONFIG_FILE"
-    fi
-    
+    [[ -f "$CONFIG_FILE" ]] || { log_error "$CONFIG_FILE not found"; return; }
     backup_file "$CONFIG_FILE"
-    
-    log_info "Configuring active cooling (Pi 5 with heatsink/fan)..."
-    
-    # Check if already configured
+
+    # Pi 5 Aggressive Cooling
     if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
         log_skip "Fan curve already configured"
     else
+        log_info "Applying aggressive fan curve (35°C start)..."
         cat >> "$CONFIG_FILE" << 'EOF'
 
-# Active Cooling for Pi 5 (HeatsinkFan Module)
-# Engages fan at 35°C for sustained performance
+# Active Cooling for Pi 5
 dtparam=fan_temp0=35000
 dtparam=fan_temp0_hyst=5000
 dtparam=fan_temp0_speed=125
@@ -95,776 +118,294 @@ dtparam=fan_temp1=50000
 dtparam=fan_temp1_hyst=5000
 dtparam=fan_temp1_speed=200
 EOF
-        log_pass "Fan curve configured (aggressive cooling)"
+        log_pass "Fan curve optimized"
     fi
-    
-    log_info "Throttling prevention: Fan starts at 35°C to avoid thermal throttling"
-}
 
-################################################################################
-# SECTION 1b: HARDWARE WATCHDOG
-# Ensures system reboots if it freezes/crashes.
-################################################################################
+    # Disable Bluetooth & Audio (Saves power/interrupts)
+    for opt in "dtoverlay=disable-bt" "dtparam=audio=off"; do
+        if grep -q "^$opt" "$CONFIG_FILE"; then
+            log_skip "$opt already set"
+        else
+            echo "$opt" >> "$CONFIG_FILE"
+            log_pass "$opt enabled"
+        fi
+    done
 
-watchdog_configuration() {
-    log_section "HARDWARE WATCHDOG"
-    
-    if ! command_exists watchdog; then
-        log_skip "Watchdog package not installed (run setup.sh)"
-        return
-    fi
-    
-    # Enable in config.txt
+    # Hardware Watchdog
     if grep -q "^dtparam=watchdog=on" "$CONFIG_FILE"; then
-        log_skip "Watchdog already enabled in boot config"
+        log_skip "Hardware watchdog already enabled"
     else
         echo "dtparam=watchdog=on" >> "$CONFIG_FILE"
-        log_pass "Watchdog enabled in boot config"
+        log_pass "Hardware watchdog enabled in config.txt"
     fi
     
-    # Configure daemon
-    local watchdog_conf="/etc/watchdog.conf"
-    if [[ -f "$watchdog_conf" ]]; then
-        # Check if uncommented first
-        if grep -q "^watchdog-device" "$watchdog_conf"; then
-            log_skip "Watchdog daemon already configured"
-        else
-            sed -i 's/#watchdog-device/watchdog-device/' "$watchdog_conf"
-            # Some configs differ, ensure we set max load
-            if grep -q "max-load-1" "$watchdog_conf"; then
-                sed -i 's/#max-load-1.*/max-load-1 = 24/' "$watchdog_conf"
-            else
-                echo "max-load-1 = 24" >> "$watchdog_conf"
-            fi
-            
-            systemctl enable watchdog >/dev/null 2>&1
-            log_pass "Watchdog daemon configured (requires reboot)"
+    if command_exists systemctl; then
+        systemctl enable --now watchdog 2>/dev/null || log_warn "Watchdog service failed to start"
+    fi
+}
+
+################################################################################
+# 2. CPU & Performance
+################################################################################
+
+optimize_cpu() {
+    log_section "CPU & PERFORMANCE"
+    
+    # Set governor to performance
+    if command_exists cpufreq-set; then
+        cpufreq-set -g performance || log_warn "Failed to set performance governor"
+        log_pass "CPU governor set to performance"
+    elif [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
+        log_pass "CPU governor set to performance (sysfs)"
+    fi
+
+    # Persistent Governor via cpufrequtils
+    if [[ -f /etc/default/cpufrequtils ]]; then
+        if ! grep -q 'GOVERNOR="performance"' /etc/default/cpufrequtils; then
+            echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
+            log_pass "Persistent CPU governor: performance"
         fi
     fi
 }
 
 ################################################################################
-# SECTION 1c: FIRMWARE CHECK
+# 3. Storage & I/O
 ################################################################################
 
-eeprom_check() {
-    log_section "FIRMWARE / EEPROM"
-    
-    if command_exists rpi-eeprom-update; then
-        log_info "Checking bootloader status..."
-        # Update if needed (default is auto, but good to run)
-        rpi-eeprom-update -a >/dev/null 2>&1
-        log_pass "Bootloader updated (if available)"
-    else
-        log_skip "rpi-eeprom-update not found"
-    fi
-}
-
-################################################################################
-# SECTION 2: USB WRITE OPTIMIZATION
-#
-# NOTE: Mount options vary by filesystem type:
-# - ext4: Supports 'errors=remount-ro' for error recovery
-# - vFAT/FAT32: Use basic options (defaults,nofail,noatime) - no error handling
-# - exFAT/NTFS: Use basic options (defaults,nofail,noatime)
-################################################################################
-
-usb_write_optimization() {
-    log_section "USB WRITE OPTIMIZATION"
+optimize_storage() {
+    log_section "STORAGE & I/O"
     
     backup_file /etc/fstab
-    
-    log_info "Optimizing root filesystem for USB longevity..."
-    
-    # Check current fstab for noatime on root (match various separators)
-    if grep -q "[[:space:]]/[[:space:]].*noatime" /etc/fstab; then
-        log_skip "Root filesystem already optimized"
+
+    # 1. Root noatime optimization (More robust regex)
+    if grep -E "^[^#].*\s/\s.*\bnoatime\b" /etc/fstab >/dev/null; then
+        log_skip "Root filesystem already has noatime"
     else
-        # Backup and update root entry
-        cp /etc/fstab /etc/fstab.orig
-        # Use robust regex to handle PARTUUID and tabs/spaces
-        sed -i 's|^\[^#\]*[[:space:]]\+/[[:space:]]\+[^[:space:]]\+[[:space:]]\+\)\(.*\)|\1\2,noatime|' /etc/fstab
-        log_pass "Root filesystem: noatime enabled"
+        log_info "Adding noatime to root filesystem..."
+        # Target the root mount entry specifically
+        sed -i '/[[:space:]]\/[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
+        log_pass "Root filesystem optimized: noatime"
     fi
-    
-    log_info "Mount options explanation:"
-    echo "  noatime: Disables atime updates (many writes avoided)"
-    
-    # Check /mnt/usb mount
-    if mount | grep -q "/mnt/usb"; then
-        if mount | grep "/mnt/usb" | grep -q "noatime"; then
-            log_skip "/mnt/usb already optimized"
-        else
-            # Detect filesystem type to show appropriate mount options
-            local usb_fstype=$(mount | grep "on /mnt/usb" | awk '{print $5}' | tr -d '()')
-            case "$usb_fstype" in
-                ext4)
-                    log_info "Note: /mnt/usb (ext4) should have: defaults,nofail,noatime,errors=remount-ro"
-                    ;;
-                vfat|ntfs|exfat)
-                    log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;
-                *)
-                    log_info "Note: /mnt/usb ($usb_fstype) should have: defaults,nofail,noatime"
-                    ;;
-            esac
-            log_info "      Edit /etc/fstab and remount: sudo mount -o remount /mnt/usb"
+
+    # 2. I/O Scheduler (BFQ for USB/SD)
+    log_info "Configuring BFQ scheduler..."
+    local devices=$(lsblk -d -o NAME,TRAN | grep -E "usb|sd" | awk '{print $1}' || echo "")
+    for dev in $devices; do
+        if [[ -f "/sys/block/$dev/queue/scheduler" ]]; then
+            if grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
+                echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
+            fi
         fi
+    done
+
+    # 3. fstrim for SSDs (if applicable)
+    if systemctl list-unit-files | grep -q fstrim.timer; then
+        systemctl enable --now fstrim.timer >/dev/null 2>&1
+        log_pass "Fstrim timer enabled"
     fi
 }
 
 ################################################################################
-# SECTION 3: DOCKER OPTIMIZATION
+# 4. Kernel Tuning (Sysctl)
 ################################################################################
 
-docker_optimization() {
+optimize_kernel() {
+    log_section "KERNEL TUNING"
+    
+    local sysctl_conf="/etc/sysctl.d/99-server-optimize.conf"
+    backup_file "$sysctl_conf"
+
+    cat > "$sysctl_conf" << 'EOF'
+# Memory Management
+vm.swappiness=10
+vm.dirty_ratio=15
+vm.dirty_background_ratio=5
+vim.vfs_cache_pressure=50
+vim.overcommit_memory=1
+
+# Network Stack Optimizations
+net.core.somaxconn=1024
+net.core.netdev_max_backlog=5000
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_max_syn_backlog=4096
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.ip_forward=1
+
+# TCP BBR
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+
+# Security Hardening
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.default.rp_filter=1
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.tcp_syncookies=1
+kernel.kptr_restrict=2
+kernel.dmesg_restrict=1
+EOF
+
+    sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
+    log_pass "Kernel parameters optimized (including BBR & Security)"
+}
+
+################################################################################
+# 5. Docker Optimization
+################################################################################
+
+optimize_docker() {
     log_section "DOCKER OPTIMIZATION"
     
     if ! command_exists docker; then
         log_skip "Docker not installed"
         return
     fi
-    
-    log_info "Docker storage configuration..."
-    
-    # Create daemon.json if not exists
-    DOCKER_CONFIG="/etc/docker/daemon.json"
-    mkdir -p /etc/docker
-    
-    if [[ ! -f "$DOCKER_CONFIG" ]]; then
-        # Check USB filesystem type
-        local usb_fstype=$(findmnt -n -o FSTYPE -T /mnt/usb 2>/dev/null)
-        local data_root_config=""
-        
-        if [[ "$usb_fstype" == "ext4" ]]; then
-             data_root_config='"data-root": "/mnt/usb/docker",'
-             log_info "Configuring Docker to use USB storage (ext4 detected)"
-        else
-             log_warn "USB is not ext4 ($usb_fstype) - Keeping Docker on default storage"
-        fi
 
-        cat > "$DOCKER_CONFIG" << EOF
-{
-    ${data_root_config}
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "50m",
-        "max-file": "3",
-        "labels": "com.docker.logs.rotation=daily"
-    },
-    "storage-driver": "overlay2",
-    "live-restore": true,
-    "userland-proxy": false,
-    "features": {
-        "buildkit": true
-    },
-    "metrics-addr": "127.0.0.1:9323",
-    "experimental": true
-}
-EOF
-        log_pass "Docker daemon configuration created"
-    else
-        log_info "Docker daemon.json exists - verify settings"
+    local docker_config="/etc/docker/daemon.json"
+    backup_file "$docker_config"
+
+    # Robust JSON generation
+    local config_content='{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "live-restore": true,
+  "userland-proxy": false,
+  "no-new-privileges": true,
+  "features": { "buildkit": true },
+  "default-ulimits": {
+    "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 }
+  }
+}'
+
+    # Check for USB mount and add data-root if necessary
+    if mountpoint -q /mnt/usb; then
+        if [[ -d "/mnt/usb/docker" ]] || mkdir -p /mnt/usb/docker; then
+            if command_exists jq; then
+                config_content=$(echo "$config_content" | jq '. + {"data-root": "/mnt/usb/docker"}')
+            else
+                # Fallback simple append if jq missing (less robust but works for fresh install)
+                config_content=$(echo "$config_content" | sed 's/}/  ,"data-root": "\/mnt\/usb\/docker"\n}/')
+            fi
+            log_info "Configuring Docker to use /mnt/usb/docker"
+        fi
     fi
-    
-    # Optimize Docker service (Systemd override)
+
+    echo "$config_content" > "$docker_config"
+    log_pass "Docker daemon.json optimized"
+
+    # Systemd Override
     mkdir -p /etc/systemd/system/docker.service.d
-    local override_file="/etc/systemd/system/docker.service.d/override.conf"
-    
-    local mount_dep=""
-    if grep -q "/mnt/usb" "$DOCKER_CONFIG" 2>/dev/null; then
-        mount_dep="RequiresMountsFor=/mnt/usb"
-        log_info "Adding Docker dependency on USB mount"
-    fi
-    
-    if [[ ! -f "$override_file" ]]; then
-        cat > "$override_file" << EOF
+    cat > /etc/systemd/system/docker.service.d/override.conf << 'EOF'
 [Unit]
-${mount_dep}
+After=mnt-usb.mount
+RequiresMountsFor=/mnt/usb
 
 [Service]
-# Limit systemd resource usage for Docker
-MemoryLimit=1G
-# Network optimizations
 ExecStart=
 ExecStart=/usr/bin/dockerd --log-level=warn
+TasksMax=infinity
+LimitNOFILE=infinity
+LimitNPROC=infinity
 EOF
-        systemctl daemon-reload
-        log_pass "Docker service optimization applied"
-    else
-        # Update existing file if mount dep is needed but missing
-        if [[ -n "$mount_dep" ]] && ! grep -q "RequiresMountsFor" "$override_file"; then
-             # Prepend Unit section with dependency
-             sed -i "1s/^/[Unit]\n${mount_dep}\n\n/" "$override_file"
-             systemctl daemon-reload
-             log_pass "Docker service updated: Added USB mount dependency"
-        else
-             log_skip "Docker service already customized"
-        fi
-    fi
+    systemctl daemon-reload
+    log_pass "Docker systemd overrides applied"
     
-    # Ensure user is in docker group
-    local target_user="${SUDO_USER:-$USER}"
-    if [[ "$target_user" != "root" ]]; then
-        if ! groups "$target_user" | grep -q "\bdocker\b"; then
-            log_info "Adding user $target_user to docker group..."
-            usermod -aG docker "$target_user"
-            log_pass "User $target_user added to docker group"
-        else
-            log_pass "User $target_user already in docker group"
-        fi
-    fi
-
-    # Restart Docker to apply
-    log_info "Restarting Docker daemon..."
     systemctl restart docker || log_error "Failed to restart Docker"
-    log_pass "Docker restarted with optimizations"
 }
 
 ################################################################################
-# SECTION 4: MEMORY OPTIMIZATION (ZRAM)
-# Creates a compressed block device in RAM to use as swap.
-# Significantly faster than disk swap and saves SD card wear.
+# 6. Memory & Swap (ZRAM)
 ################################################################################
 
-memory_optimization() {
-    log_section "MEMORY OPTIMIZATION (ZRAM/Compressed Swap)"
-    
-    log_info "Configuring ZRAM (in-memory compression)..."
-    
-    # Create ZRAM configuration
-    mkdir -p /etc/rpi/swap.conf.d
-    
-    if [[ ! -f /etc/rpi/swap.conf.d/size.conf ]]; then
-        cat > /etc/rpi/swap.conf.d/size.conf << 'EOF'
-[Zram]
-# Maximum ZRAM size (use 50% of RAM, up to 2GB)
-MaxSizeMiB=2048
+optimize_memory() {
+    log_section "MEMORY & SWAP"
 
-# Use zstd for better compression on ARM
-CompressionAlgorithm=zstd
-EOF
-        log_pass "ZRAM configured (2GB compressed swap)"
-    else
-        log_skip "ZRAM already configured"
+    # ZRAM setup (Generic via zram-tools if available)
+    if [[ -f /etc/default/zramswap ]]; then
+        sed -i 's/ALGO=.*/ALGO=zstd/' /etc/default/zramswap
+        sed -i 's/PERCENT=.*/PERCENT=60/' /etc/default/zramswap
+        systemctl restart zramswap 2>/dev/null || true
+        log_pass "ZRAM tuned: zstd, 60%"
     fi
-    
-    # Disable regular swap if present
-    if swapon -s 2>/dev/null | grep -qv "Filename"; then
-        log_info "Regular swap detected - ZRAM is preferred"
-        log_info "To disable: swapoff -a && dphys-swapfile swapoff && apt remove dphys-swapfile"
+
+    # Disable traditional swap if ZRAM is active
+    if [[ -f /sys/block/zram0/disksize ]]; then
+        if swapon --show | grep -qv "zram"; then
+            log_info "Disabling disk-based swap..."
+            swapoff -a 2>/dev/null || true
+            # Comment out swap in fstab
+            sed -i '/\sswap\s/ s/^/#/' /etc/fstab
+            log_pass "Traditional swap disabled"
+        fi
     fi
-    
-    log_info "Benefits:"
-    echo "  - Compressed memory for cache buffering"
-    echo "  - Reduces storage wear from page thrashing"
-    echo "  - Faster than disk swap"
 }
 
 ################################################################################
-# SECTION 5: LOG MANAGEMENT
-# Reduces disk writes by storing logs in RAM (volatile).
+# 7. Log Management
 ################################################################################
 
-log_management() {
+optimize_logs() {
     log_section "LOG MANAGEMENT"
-    
-    log_info "Optimizing systemd-journald..."
-    
-    # Create journald config if not exists
-    if [[ ! -f /etc/systemd/journald.conf.d/rpi-optimize.conf ]]; then
-        mkdir -p /etc/systemd/journald.conf.d
-        
-        cat > /etc/systemd/journald.conf.d/rpi-optimize.conf << 'EOF'
+
+    # Journald volatile storage
+    local journal_conf_dir="/etc/systemd/journald.conf.d"
+    mkdir -p "$journal_conf_dir"
+    cat > "${journal_conf_dir}/optimize.conf" << 'EOF'
 [Journal]
-# Store logs in RAM (volatile) to reduce USB wear
 Storage=volatile
-
-# Keep only 50MB of logs in memory
-RuntimeMaxUse=50M
-RuntimeMaxFileSize=5M
-RuntimeMaxFiles=10
-
-# Compress logs
+RuntimeMaxUse=64M
+RuntimeMaxFileSize=8M
 Compress=yes
 EOF
-        systemctl restart systemd-journald
-        log_pass "Systemd-journald optimized (volatile)"
-    else
-        log_skip "Journald already configured"
-    fi
-    
-    # Optimize log2ram if installed
+    systemctl restart systemd-journald
+    log_pass "Journald optimized for volatile storage"
+
+    # Log2Ram (if installed)
     if [[ -f /etc/log2ram.conf ]]; then
-        log_info "Optimizing log2ram..."
-        
-        if grep -q "ZL2R=true" /etc/log2ram.conf; then
-            sed -i 's/ZL2R=true/ZL2R=false/' /etc/log2ram.conf
-            log_pass "log2ram ZL2R: Disabled (conflicts with ZRAM)"
-        fi
-        
-        if grep -q "SIZE=40M" /etc/log2ram.conf; then
-            sed -i 's/SIZE=40M/SIZE=100M/' /etc/log2ram.conf
-            log_pass "log2ram size: Increased to 100MB"
-        fi
+        sed -i 's/SIZE=.*/SIZE=128M/' /etc/log2ram.conf
+        log_pass "Log2Ram size increased to 128M"
     fi
 }
 
 ################################################################################
-# SECTION 6: IO SCHEDULER OPTIMIZATION
-# Uses BFQ scheduler which is optimized for responsiveness and throughput
-# on slower storage devices like USB/SD.
+# 8. Maintenance & Security
 ################################################################################
 
-io_scheduler_optimization() {
-    log_section "IO SCHEDULER OPTIMIZATION"
+system_maintenance() {
+    log_section "MAINTENANCE & SECURITY"
     
-    log_info "Optimizing storage IO scheduler..."
-    
-    # Find storage devices
-    local devices=$(lsblk -d -o NAME,TRAN | grep -E "usb|ata" | awk '{print "/dev/"$1}')
-    
-    if [[ -z "$devices" ]]; then
-        log_skip "No USB/ATA devices found"
-        return
+    log_info "Cleaning package cache..."
+    apt-get autoremove -y >/dev/null 2>&1
+    apt-get autoclean -y >/dev/null 2>&1
+    log_pass "Apt cleanup complete"
+
+    # Firewall setup
+    if command_exists ufw; then
+        ufw allow ssh >/dev/null
+        ufw allow 80/tcp >/dev/null
+        ufw allow 443/tcp >/dev/null
+        # Allow Docker traffic
+        ufw allow in on docker0 >/dev/null
+        echo "y" | ufw enable >/dev/null
+        log_pass "Firewall (UFW) configured and enabled"
     fi
-    
-    for device in $devices; do
-        local dev_name=$(basename "$device")
-        local sched_path="/sys/block/$dev_name/queue/scheduler"
-        
-        if [[ -f "$sched_path" ]]; then
-            # BFQ is better for random IO workloads (Docker)
-            if echo "bfq" > "$sched_path" 2>/dev/null; then
-                log_pass "IO scheduler: BFQ enabled for $device"
-            else
-                # Fallback to mq-deadline
-                if echo "mq-deadline" > "$sched_path" 2>/dev/null; then
-                    log_pass "IO scheduler: mq-deadline enabled for $device"
-                else
-                    log_skip "Could not set IO scheduler for $device"
-                fi
-            fi
-        fi
-    done
-    
-    # Persist IO scheduler settings
-    if [[ ! -f /etc/systemd/system/io-scheduler.service ]]; then
-        cat > /etc/systemd/system/io-scheduler.service << 'EOF'
-[Unit]
-Description=Set BFQ IO Scheduler on boot
-After=local-fs.target
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/set-io-scheduler.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        
-        cat > /usr/local/bin/set-io-scheduler.sh << 'EOF'
-#!/bin/bash
-for device in $(lsblk -d -o NAME,TRAN | grep -E "usb|ata" | awk '{print "/dev/"$1}'); do
-    dev_name=$(basename "$device")
-    echo "bfq" > "/sys/block/$dev_name/queue/scheduler" 2>/dev/null || \
-    echo "mq-deadline" > "/sys/block/$dev_name/queue/scheduler" 2>/dev/null
-done
-EOF
-        chmod +x /usr/local/bin/set-io-scheduler.sh
-        systemctl daemon-reload
-        systemctl enable io-scheduler.service
-        log_pass "IO scheduler persistence: Enabled"
-    fi
-}
-
-################################################################################
-# SECTION 7: KERNEL PARAMETERS
-# Tunes the Linux kernel for network performance (BBR) and memory management.
-################################################################################
-
-kernel_tuning() {
-    log_section "KERNEL PARAMETER TUNING"
-    
-    mkdir -p /etc/sysctl.d
-    
-    # Create or update optimization config
-    if [[ ! -f /etc/sysctl.d/99-rpi-optimize.conf ]] || ! grep -q "bbr" /etc/sysctl.d/99-rpi-optimize.conf; then
-        cat > /etc/sysctl.d/99-rpi-optimize.conf << 'EOF'
-# Raspberry Pi Home Server Optimizations
-
-# Memory management
-vm.swappiness=30
-vm.dirty_ratio=40
-vm.dirty_background_ratio=20
-vm.overcommit_memory=1
-
-# Network optimization
-net.core.somaxconn=1024
-net.ipv4.tcp_max_syn_backlog=2048
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.ip_local_port_range=1024 65535
-
-# Docker-specific
-net.ipv4.conf.default.rp_filter=0
-net.ipv4.conf.all.rp_filter=0
-net.bridge.bridge-nf-call-iptables=1
-net.bridge.bridge-nf-call-ip6tables=1
-
-# TCP BBR Congestion Control
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-        sysctl -p /etc/sysctl.d/99-rpi-optimize.conf >/dev/null 2>&1
-        log_pass "Kernel parameters optimized (including BBR)"
-    else
-        log_skip "Kernel parameters already configured"
-    fi
-    
-    # Load BBR module
-    if ! lsmod | grep -q tcp_bbr; then
-        modprobe tcp_bbr 2>/dev/null || log_warn "Failed to load tcp_bbr module"
-        mkdir -p /etc/modules-load.d
-        if ! grep -q "tcp_bbr" /etc/modules-load.d/modules.conf 2>/dev/null; then
-             echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
-        fi
-    fi
-}
-
-################################################################################
-# SECTION 8: CONTAINER OPTIMIZATION
-################################################################################
-
-container_optimization() {
-    log_section "CONTAINER OPTIMIZATION"
-    
-    if ! command_exists docker; then
-        log_skip "Docker not installed"
-        return
-    fi
-    
-    log_info "Docker best practices for home server:"
-    
-    echo "  1. Use --memory-reservation for containers"
-    echo "     docker run --memory-reservation 256m ..."
-    echo ""
-    echo "  2. Enable health checks"
-    echo "     HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD ..."
-    echo ""
-    echo "  3. Mount volumes from USB"
-    echo "     docker run -v /mnt/usb/data:/data ..."
-    echo ""
-    echo "  4. Use restart policies"
-    echo "     docker run --restart unless-stopped ..."
-    echo ""
-    echo "  5. Set resource limits"
-    echo "     docker run --cpus=0.5 --memory=512m ..."
-}
-
-################################################################################
-# SECTION 9: NETWORK OPTIMIZATION
-################################################################################
-
-network_optimization() {
-    log_section "NETWORK OPTIMIZATION"
-    
-    log_info "Network configuration for Docker containers..."
-    
-    # Enable IP forwarding for Tailscale/networking
-    if grep -q "^net.ipv4.ip_forward" /etc/sysctl.d/99-rpi-optimize.conf 2>/dev/null; then
-        log_skip "IP forwarding already enabled"
-    else
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.d/99-rpi-optimize.conf
-        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-        log_pass "IP forwarding enabled (required for VPN/Tailscale)"
-    fi
-    
-    # Enable IPv6 if available
-    if [[ -f /etc/sysctl.d/99-rpi-optimize.conf ]]; then
-        if grep -q "^net.ipv6.conf.all.disable_ipv6" /etc/sysctl.d/99-rpi-optimize.conf; then
-            log_skip "IPv6 already configured"
-        else
-            echo "net.ipv6.conf.all.disable_ipv6=0" >> /etc/sysctl.d/99-rpi-optimize.conf
-            log_pass "IPv6 enabled"
-        fi
-    fi
-}
-
-################################################################################
-# SECTION 9b: SYSTEM CLEANUP
-# Removes unnecessary packages to save space and reduce attack surface.
-################################################################################
-
-system_cleanup() {
-    log_section "SYSTEM CLEANUP"
-    
-    log_info "Removing unused packages..."
-    
-    # Remove triggerhappy
-    if dpkg -l | grep -q triggerhappy; then
-        apt purge -y triggerhappy >/dev/null 2>&1
-        log_pass "Removed: triggerhappy"
-    else
-        log_skip "triggerhappy not installed"
-    fi
-    
-    # Remove modemmanager (unused on most servers)
-    if dpkg -l | grep -q modemmanager; then
-        apt purge -y modemmanager >/dev/null 2>&1
-        log_pass "Removed: modemmanager"
-    else
-        log_skip "modemmanager not installed"
-    fi
-    
-    # Remove dphys-swapfile if ZRAM is active
-    if [[ -f /etc/rpi/swap.conf.d/size.conf ]] && dpkg -l | grep -q dphys-swapfile; then
-        dphys-swapfile swapoff >/dev/null 2>&1
-        apt purge -y dphys-swapfile >/dev/null 2>&1
-        log_pass "Removed: dphys-swapfile (using ZRAM)"
-    fi
-    
-    # Clean docs/man pages to save space (approx 100MB)
-    log_info "Cleaning documentation (save space)..."
-    rm -rf /usr/share/doc/* 2>/dev/null
-    rm -rf /usr/share/man/* 2>/dev/null
-    log_pass "Removed: /usr/share/doc and /usr/share/man content"
-    
-    # Autoremove
-    apt autoremove -y >/dev/null 2>&1
-    log_pass "Autoremove unused dependencies"
-}
-
-################################################################################
-# SECTION 10: CACHE CLEARING
-################################################################################
-
-cache_clearing() {
-    log_section "CACHE CLEARING"
-    
-    log_info "Clearing system and application caches..."
-    
-    # Clear apt cache
-    log_info "Clearing apt cache..."
-    apt clean || log_skip "apt clean failed"
-    apt autoclean || log_skip "apt autoclean failed"
-    apt autoremove -y >/dev/null 2>&1 || log_skip "apt autoremove failed"
-    log_pass "Apt cache cleared"
-    
-    # Clear npm cache if npm is installed
-    if command_exists npm; then
-        log_info "Clearing npm cache..."
-        npm cache clean --force >/dev/null 2>&1 || log_skip "npm cache clean failed"
-        log_pass "Npm cache cleared"
-    fi
-    
-    # Clear systemd journal if too large
-    log_info "Optimizing systemd journal..."
-    journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*M|[0-9.]*G' | head -1 | while read size; do
-        if [[ -n "$size" ]]; then
-            log_info "  Current journal size: $size"
-        fi
-    done
-    journalctl --vacuum-time=7d >/dev/null 2>&1
-    log_pass "Journal optimized (7-day retention)"
-    
-    # Clear tmp directories
-    log_info "Clearing temporary files..."
-    find /tmp -type f -atime +7 -delete 2>/dev/null
-    find /var/tmp -type f -atime +7 -delete 2>/dev/null
-    log_pass "Temporary files cleaned"
-    
-    # Docker cleanup
-    if command_exists docker; then
-        log_info "Running Docker cleanup..."
-        docker system prune -f >/dev/null 2>&1 || log_skip "docker system prune failed"
-        log_pass "Docker dangling images/containers cleaned"
-    fi
-    
-    log_info "Cache clearing complete - freed up disk space"
-}
-
-################################################################################
-# SECTION 11: NPM OPTIMIZATION
-################################################################################
-
-npm_optimization() {
-    log_section "NPM OPTIMIZATION"
-    
-    if ! command_exists npm; then
-        log_skip "npm not installed"
-        return
-    fi
-    
-    log_info "Optimizing npm configuration..."
-    
-    # Determine target user
-    local target_user="${SUDO_USER:-$USER}"
-    local target_home=$(getent passwd "$target_user" | cut -d: -f6)
-    
-    if [[ -z "$target_home" ]]; then
-        target_home="$HOME"
-    fi
-    
-    log_info "Configuring npm for user: $target_user"
-    NPM_CONFIG="$target_home/.npmrc"
-    
-    # Ensure global prefix is set for non-root users
-    if [[ "$target_user" != "root" ]]; then
-        local npm_global_dir="$target_home/.npm-global"
-        
-        # Check current prefix
-        local current_prefix=$(sudo -u "$target_user" npm config get prefix)
-        
-        if [[ "$current_prefix" != "$npm_global_dir" ]]; then
-            log_info "Setting npm prefix to $npm_global_dir..."
-            mkdir -p "$npm_global_dir"
-            chown "$target_user:$target_user" "$npm_global_dir"
-            sudo -u "$target_user" npm config set prefix "$npm_global_dir"
-            log_pass "npm global prefix updated"
-            
-            # Update PATH in bashrc if needed
-            if ! grep -q ".npm-global/bin" "$target_home/.bashrc"; then
-                echo "" >> "$target_home/.bashrc"
-                echo "# npm global binaries" >> "$target_home/.bashrc"
-                echo 'export PATH=~/.npm-global/bin:$PATH' >> "$target_home/.bashrc"
-                log_pass "Added ~/.npm-global/bin to .bashrc"
-            fi
-        else
-            log_pass "npm global prefix correct ($npm_global_dir)"
-        fi
-    fi
-    
-    # Create .npmrc if it doesn't exist
-    if [[ ! -f "$NPM_CONFIG" ]]; then
-        cat > "$NPM_CONFIG" << 'EOF'
-# NPM optimization for ARM/Raspberry Pi
-audit=false
-fund=false
-update-notifier=false
-
-# Cache settings
-cache-min=999999999
-cache-max=999999999
-
-# Performance tuning
-prefer-offline=true
-fetch-retry-mintimeout=20000
-fetch-retry-maxtimeout=120000
-
-# Security
-registry=https://registry.npmjs.org
-EOF
-        if [[ -n "$SUDO_USER" ]]; then
-            chown "$target_user" "$NPM_CONFIG"
-        fi
-        log_pass "npm config file created ($NPM_CONFIG)"
-    else
-        log_info "npm config already exists ($NPM_CONFIG), reviewing..."
-        if grep -q "cache-min" "$NPM_CONFIG"; then
-            log_pass "npm caching already optimized"
-        else
-            log_info "Consider adding: npm config set cache-min=999999999"
-        fi
-    fi
-    
-    # Clean npm cache
-    sudo -u "$target_user" npm cache verify 2>/dev/null >/dev/null
-    log_pass "npm cache verified"
-    
-    # Show npm info
-    NPM_VERSION=$(npm --version)
-    NPM_CACHE_SIZE=$(du -sh "$target_home/.npm" 2>/dev/null | awk '{print $1}')
-    log_info "npm version: $NPM_VERSION"
-    if [[ -n "$NPM_CACHE_SIZE" ]]; then
-        log_info "npm cache size: $NPM_CACHE_SIZE"
-    fi
-}
-
-################################################################################
-# SECTION 12: VERIFICATION
-################################################################################
-
-verify_optimizations() {
-    log_section "VERIFICATION"
-    
-    log_info "Checking applied optimizations..."
-    
-    # Check thermal config
-    if grep -q "dtparam=fan_temp0" "$CONFIG_FILE"; then
-        log_pass "Thermal: Fan curve configured"
-    fi
-    
-    # Check USB optimization
-    if grep -q "noatime.*commit=" /etc/fstab; then
-        log_pass "USB: Write optimization enabled"
-    fi
-    
-    # Check Docker
-    if command_exists docker && systemctl is-active --quiet docker; then
-        log_pass "Docker: Running and optimized"
-    fi
-    
-    # Check ZRAM
-    if [[ -f /sys/block/zram0/disksize ]]; then
-        ZRAM_SIZE=$(cat /sys/block/zram0/disksize 2>/dev/null)
-        if [[ "$ZRAM_SIZE" != "0" ]]; then
-            log_pass "ZRAM: Compressed swap active"
-        fi
-    fi
-    
-    # Check journald
-    if [[ -f /etc/systemd/journald.conf.d/rpi-optimize.conf ]]; then
-        log_pass "Journald: Volatile storage enabled"
-    fi
-}
-
-################################################################################
-# SECTION 13: SUMMARY & REBOOT
-################################################################################
-
-summary_and_reboot() {
-    log_section "OPTIMIZATION COMPLETE"
-    
-    log_success "✓ Optimizations Applied: $OPTIMIZATIONS_APPLIED"
-    log_info "Skipped: $OPTIMIZATIONS_SKIPPED"
-    
-    if [[ $WARNINGS -gt 0 ]]; then
-        log_warn "Warnings: $WARNINGS"
-    else
-        log_info "Warnings: $WARNINGS"
-    fi
-    
-    log_info ""
-    log_info "Applied optimizations:"
-    echo "  ✓ Thermal management (Pi 5 fan curve)"
-    echo "  ✓ USB write optimization (noatime, commit=600)"
-    echo "  ✓ Docker daemon tuning (overlay2, logging)"
-    echo "  ✓ Memory compression (ZRAM)"
-    echo "  ✓ Log management (volatile journald)"
-    echo "  ✓ IO scheduler (BFQ for USB)"
-    echo "  ✓ Kernel parameters"
-    echo "  ✓ Network optimization"
-    echo "  ✓ Cache clearing (apt, npm, Docker)"
-    echo "  ✓ npm optimization and verification"
-    
-    log_info ""
-    log_info "Performance improvements:"
-    echo "  - Reduced USB wear by 50-70%"
-    echo "  - Better thermal management"
-    echo "  - Faster Docker performance"
-    echo "  - Improved memory usage"
-    echo "  - Freed up disk space"
-    echo "  - Optimized npm for ARM"
-    
-    log_warn ""
-    log_warn "Some optimizations require reboot!"
-    
-    log_info ""
-    log_info "Next steps:"
-    echo "  1. sudo reboot (to apply all changes)"
-    echo "  2. sudo ./diag.sh (verify optimizations)"
-    echo "  3. Monitor: docker stats, watch sensors"
+    log_info "Removing documentation to save space..."
+    rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* 2>/dev/null || true
+    log_pass "Documentation cleared"
 }
 
 ################################################################################
@@ -873,29 +414,41 @@ summary_and_reboot() {
 
 main() {
     require_root
+    acquire_lock
     
-    log_section "RASPBERRY PI HOME SERVER OPTIMIZATION v$SCRIPT_VERSION"
-    log_info "Target: Debian Trixie with Docker + USB storage"
-    log_info ""
+    echo -e "${MAGENTA}"
+    echo "██████╗ ██████╗ ██╗    ██████╗ ██████╗ ████████╗██╗███╗   ███╗██╗███████╗███████╗"
+    echo "██╔══██╗██╔══██╗██║    ██╔══██╗██╔══██╗╚══██╔══╝██║████╗ ████║██║╚══███╔╝██╔════╝"
+    echo "██████╔╝██████╔╝██║    ██║  ██║██████╔╝   ██║   ██║██╔████╔██║██║  ███╔╝ █████╗  "
+    echo "██╔══██╗██╔═══╝ ██║    ██║  ██║██╔═══╝    ██║   ██║██║╚██╔╝██║██║ ███╔╝  ██╔══╝  "
+    echo "██║  ██║██║     ██║    ██████╔╝██║        ██║   ██║██║ ╚═╝ ██║██║███████╗███████╗"
+    echo "╚═╝  ╚═╝╚═╝     ╚═╝    ╚═════╝ ╚═╝        ╚═╝   ╚═╝╚═╝     ╚═╝╚═╝╚══════╝╚══════╝"
+    echo -e "${NC}"
+    log_info "RPI SERVER OPTIMIZER v${SCRIPT_VERSION}"
+    log_info "Started at: $(date)"
     
-    # Apply optimizations
-    thermal_optimization
-    watchdog_configuration
-    eeprom_check
-    usb_write_optimization
-    docker_optimization
-    memory_optimization
-    log_management
-    io_scheduler_optimization
-    kernel_tuning
-    container_optimization
-    network_optimization
-    system_cleanup
-    cache_clearing
-    npm_optimization
-    verify_optimizations
-    summary_and_reboot
+    # Run modules
+    optimize_hardware
+    optimize_cpu
+    optimize_storage
+    optimize_kernel
+    optimize_docker
+    optimize_memory
+    optimize_logs
+    system_maintenance
+    
+    # Summary
+    log_section "OPTIMIZATION SUMMARY"
+    log_success "Applied: $OPTIMIZATIONS_APPLIED"
+    log_info "Skipped: $OPTIMIZATIONS_SKIPPED"
+    log_warn "Warnings: $WARNINGS"
+    
+    if [[ $ERRORS -gt 0 ]]; then
+        log_error "Errors: $ERRORS"
+    fi
+
+    log_warn "REBOOT IS REQUIRED TO APPLY ALL CHANGES."
+    log_info "Log file: $LOG_FILE"
 }
 
-# Execute main
 main "$@"
