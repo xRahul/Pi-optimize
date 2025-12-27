@@ -24,7 +24,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-SCRIPT_VERSION="2.5"
+SCRIPT_VERSION="2.6"
 USB_MOUNT_PATH="/mnt/usb"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -420,6 +420,58 @@ EOF
     chown -R "$target_user:$target_user" "$gemini_dir"
 }
 
+syncthing_setup() {
+    log_section "SYNCTHING INSTALLATION"
+    
+    if command_exists syncthing; then
+        log_pass "Syncthing already installed: $(syncthing --version | head -n 1)"
+        return 0
+    fi
+    
+    if ! confirm_action "Install Syncthing (official repository)?"; then
+        log_warn "Skipped Syncthing installation"
+        return 1
+    fi
+    
+    log_info "Adding Syncthing's official GPG key..."
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://syncthing.net/release-key.gpg -o /etc/apt/keyrings/syncthing-archive-keyring.gpg || \
+        log_error "Failed to download Syncthing GPG key"
+    
+    log_info "Adding Syncthing repository to APT sources..."
+    echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" | \
+        tee /etc/apt/sources.list.d/syncthing.list > /dev/null
+    
+    log_info "Updating package lists..."
+    apt update || log_error "Failed to update package lists"
+    
+    log_info "Installing Syncthing..."
+    apt install -y syncthing || log_error "Failed to install Syncthing"
+    
+    log_pass "Syncthing installed: $(syncthing --version | head -n 1)"
+
+    # Increase inotify limits for better sync performance
+    log_info "Optimizing system for Syncthing (inotify limits)..."
+    if ! grep -q "fs.inotify.max_user_watches" /etc/sysctl.conf; then
+        echo "fs.inotify.max_user_watches=204800" >> /etc/sysctl.conf
+        sysctl -p
+        log_pass "Inotify limits increased"
+    else
+        log_info "Inotify limits already configured"
+    fi
+
+    # Enable Syncthing service for the target user
+    local target_user="${SUDO_USER:-$USER}"
+    if [[ "$target_user" != "root" ]]; then
+        log_info "Enabling Syncthing service for user: $target_user"
+        systemctl enable syncthing@"$target_user".service || log_warn "Failed to enable Syncthing service"
+        systemctl start syncthing@"$target_user".service || log_warn "Failed to start Syncthing service"
+        log_pass "Syncthing service active for $target_user"
+    else
+        log_warn "Running as root without SUDO_USER. Skipping systemd service enablement."
+    fi
+}
+
 ################################################################################
 # USB Mount Setup
 #
@@ -553,11 +605,11 @@ usb_mount_setup() {
         vfat|ntfs|exfat)
             # FAT/NTFS/exFAT filesystems don't support all ext4 options
             # Skip errors=remount-ro for compatibility
-            mount_opts="defaults,nofail,noatime"
+            mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,fmask=0000,dmask=0000"
             ;;
         *)
             # Default fallback for unknown filesystems
-            mount_opts="defaults,nofail,noatime"
+            mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,fmask=0000,dmask=0000"
             log_warn "Unknown filesystem type: $fstype - using default mount options"
             ;;
     esac
@@ -597,16 +649,8 @@ EOF
     log_info "Setting permissions on $USB_MOUNT_PATH..."
     chmod 755 "$USB_MOUNT_PATH"
     
-    # Create subdirectories for Docker
-    mkdir -p "$USB_MOUNT_PATH/docker" "$USB_MOUNT_PATH/data" "$USB_MOUNT_PATH/backups"
-    chmod 700 "$USB_MOUNT_PATH/docker"
-    chmod 755 "$USB_MOUNT_PATH/data" "$USB_MOUNT_PATH/backups"
-    
     log_pass "USB mount configured successfully"
     log_info "  Mount point: $USB_MOUNT_PATH"
-    log_info "  Docker root: $USB_MOUNT_PATH/docker"
-    log_info "  Data directory: $USB_MOUNT_PATH/data"
-    log_info "  Backups directory: $USB_MOUNT_PATH/backups"
 }
 
 ################################################################################
@@ -793,6 +837,9 @@ main() {
     
     # USB Mount configuration (detect, format, mount)
     usb_mount_setup
+    
+    # Syncthing setup
+    syncthing_setup
     
     # Hardware pruning (Bluetooth/Audio)
     hardware_pruning

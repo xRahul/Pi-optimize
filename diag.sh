@@ -22,7 +22,7 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-SCRIPT_VERSION="2.5"
+SCRIPT_VERSION="2.6"
 SCORE=0
 ISSUES=0
 WARNINGS=0
@@ -329,7 +329,36 @@ else
 fi
 
 ################################################################################
-# SECTION 6: SECURITY STATUS
+# SECTION 6: SYNCTHING STATUS
+################################################################################
+
+log_section "SYNCTHING STATUS"
+
+if command_exists syncthing; then
+    SYNCTHING_VER=$(syncthing --version | head -n 1 | awk '{print $2}')
+    log_pass "Syncthing: $SYNCTHING_VER"
+    
+    # Check service status for the target user
+    target_user="${SUDO_USER:-$USER}"
+    if service_active "syncthing@$target_user.service"; then
+        log_pass "  Service (syncthing@$target_user): active"
+    else
+        log_warn "  Service (syncthing@$target_user): inactive"
+    fi
+
+    # Check inotify limits
+    INOTIFY_LIMIT=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo 0)
+    if [[ "$INOTIFY_LIMIT" -ge 204800 ]]; then
+        log_pass "  Inotify limits: $INOTIFY_LIMIT (optimized)"
+    else
+        log_warn "  Inotify limits: $INOTIFY_LIMIT (low, consider increasing)"
+    fi
+else
+    log_info "Syncthing: Not installed"
+fi
+
+################################################################################
+# SECTION 7: SECURITY STATUS
 ################################################################################
 
 log_section "SECURITY STATUS"
@@ -362,7 +391,7 @@ SUDO_USERS=$(grep -Po '^sudo.+:\K.*$' /etc/group)
 log_info "Users: $USER_COUNT total, 1 admin"
 
 ################################################################################
-# SECTION 7: SERVICES & OPTIMIZATIONS
+# SECTION 8: SERVICES & OPTIMIZATIONS
 ################################################################################
 
 log_section "SERVICES & OPTIMIZATIONS"
@@ -408,7 +437,7 @@ if command_exists systemd-analyze; then
 fi
 
 ################################################################################
-# SECTION 8: RECOMMENDATIONS
+# SECTION 9: RECOMMENDATIONS
 ################################################################################
 
 log_section "RECOMMENDATIONS"
@@ -473,7 +502,7 @@ if [[ $RECS -eq 0 ]]; then
 fi
 
 ################################################################################
-# SECTION 9: SUMMARY
+# SECTION 10: SUMMARY
 ################################################################################
 
 log_section "DIAGNOSTIC SUMMARY"

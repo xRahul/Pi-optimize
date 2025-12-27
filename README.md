@@ -66,7 +66,7 @@ git clone https://github.com/xRahul/Pi-optimize.git
 cd Pi-optimize
 
 # 2. Run Setup (Interactive)
-# Installs Docker, Node.js, Gemini CLI, and mounts USB
+# Installs Docker, Node.js, Gemini CLI, Syncthing, and mounts USB
 sudo ./setup.sh
 
 # 3. Optimize (After Reboot)
@@ -92,6 +92,7 @@ Sets up the environment from scratch.
     *   **Docker**: Installs official Docker CE.
     *   **Node.js**: Installs LTS version from NodeSource.
     *   **Gemini CLI**: Installs `gemini-chat-cli` and creates `~/.gemini/settings.json` with **Preview Features Enabled**.
+    *   **Syncthing**: Installs Syncthing from official repo and optimizes inotify limits.
 
 ### 2. `optimize.sh` (The Tuning)
 Applies the "Deep Dive" configurations.
