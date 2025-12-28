@@ -83,6 +83,17 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+files_differ() {
+    local file1="$1"
+    local file2="$2"
+    if [[ ! -f "$file1" ]]; then return 0; fi # If target doesn't exist, they differ (need to write)
+    if cmp -s "$file1" "$file2"; then
+        return 1 # They are the same
+    else
+        return 0 # They differ
+    fi
+}
+
 backup_file() {
     local file="$1"
     if [[ -f "$file" ]]; then
@@ -101,6 +112,10 @@ optimize_hardware() {
     log_section "HARDWARE & THERMAL"
     
     [[ -f "$CONFIG_FILE" ]] || { log_error "$CONFIG_FILE not found"; return; }
+    # No changes needed here, grep checks prevent duplication
+    # backup_file is only called if we intend to write? 
+    # Actually, optimize_hardware logic is append-only with grep checks. 
+    # We can keep backup_file here as a safety measure before any potential edit.
     backup_file "$CONFIG_FILE"
 
     # Pi 5 Aggressive Cooling
@@ -255,13 +270,9 @@ optimize_kernel() {
     log_section "KERNEL TUNING"
     
     local sysctl_conf="/etc/sysctl.d/99-server-optimize.conf"
+    local tmp_conf="/tmp/99-server-optimize.conf.tmp"
     
-    # Check if file exists and verify checksum/content to avoid redundant writes/backups?
-    # For simplicity, we'll just backup and write. But we can silence the log if no change.
-    
-    backup_file "$sysctl_conf"
-
-    cat > "$sysctl_conf" << 'EOF'
+    cat > "$tmp_conf" << 'EOF'
 # Memory Management
 vm.swappiness=1
 vm.dirty_ratio=15
@@ -301,8 +312,15 @@ kernel.kptr_restrict=2
 kernel.dmesg_restrict=1
 EOF
 
-    sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
-    log_pass "Kernel parameters optimized (including BBR & Security)"
+    if files_differ "$sysctl_conf" "$tmp_conf"; then
+        backup_file "$sysctl_conf"
+        mv "$tmp_conf" "$sysctl_conf"
+        sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
+        log_pass "Kernel parameters optimized (including BBR & Security)"
+    else
+        rm "$tmp_conf"
+        log_skip "Kernel parameters already optimized"
+    fi
 }
 
 ################################################################################
@@ -537,16 +555,26 @@ optimize_logs() {
 
     # Journald volatile storage
     local journal_conf_dir="/etc/systemd/journald.conf.d"
+    local journal_conf="${journal_conf_dir}/optimize.conf"
+    local tmp_conf="/tmp/journald-optimize.conf.tmp"
+    
     mkdir -p "$journal_conf_dir"
-    cat > "${journal_conf_dir}/optimize.conf" << 'EOF'
+    cat > "$tmp_conf" << 'EOF'
 [Journal]
 Storage=volatile
 RuntimeMaxUse=64M
 RuntimeMaxFileSize=8M
 Compress=yes
 EOF
-    systemctl restart systemd-journald
-    log_pass "Journald optimized for volatile storage"
+
+    if files_differ "$journal_conf" "$tmp_conf"; then
+        mv "$tmp_conf" "$journal_conf"
+        systemctl restart systemd-journald
+        log_pass "Journald optimized for volatile storage"
+    else
+        rm "$tmp_conf"
+        log_skip "Journald already optimized"
+    fi
 
     # Log2Ram (if installed)
     if [[ -f /etc/log2ram.conf ]]; then
