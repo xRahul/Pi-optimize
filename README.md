@@ -28,10 +28,11 @@ The suite has been completely rewritten for **Debian Trixie (13)** and **Raspber
 *   **CPU Performance**: Sets persistent `performance` governor for maximum responsiveness.
 *   **I/O Scheduling**: Forces **BFQ scheduler** for USB/SD storage to handle random I/O (Docker) better.
 
-### 2. Flash Longevity (SD/SSD Protection)
-*   **Write Minimization**: Implements `noatime` and volatile journald storage.
-*   **ZRAM Swap**: Replaces disk-based swap with compressed RAM (`zstd`), extending SD card life by 50-70%.
-*   **Log Management**: Moves system logs to RAM to prevent constant disk writes.
+### 2. Flash Longevity & Storage
+*   **Swapoff**: Permanently disables disk-based swap to save storage wear.
+*   **ZRAM Only**: Uses compressed RAM (`zstd`) for emergency memory needs.
+*   **USB Optimization**: Disables USB autosuspend and increases `min_free_kbytes` for stability on flash drives.
+*   **Write Minimization**: Implements `noatime`, `busybox-syslogd` (RAM logging), and volatile journald.
 
 ### 3. Network & Docker
 *   **Google BBR**: Enables BBR congestion control for superior throughput.
@@ -43,9 +44,9 @@ The suite has been completely rewritten for **Debian Trixie (13)** and **Raspber
 ## 📋 Quick Start
 
 ### Prerequisites
-1.  **Hardware**: Raspberry Pi 5 (Optimized for Pi 5 firmware).
+1.  **Hardware**: Raspberry Pi 5.
 2.  **OS**: Raspberry Pi OS Lite (64-bit).
-3.  **Storage**: External USB 3.0 SSD connected to a blue port.
+3.  **Storage**: High-speed USB 3.0 Flash Drive or SSD (Running OS from USB is recommended).
 
 ### Installation
 
@@ -56,6 +57,7 @@ cd Pi-optimize
 
 # 2. Setup (The "One-Shot" Command)
 # Installs dependencies, Docker, Node.js, mounts USB, and runs optimize.sh automatically.
+# Detects USB boot and skips existing packages.
 sudo ./setup.sh
 
 # 3. Verify
@@ -67,13 +69,14 @@ sudo ./diag.sh
 ## 🔧 Script Breakdown
 
 ### 🛠 `setup.sh` (The Provisioner)
-*   **Dependencies**: Installs `fail2ban`, `ufw`, `smartmontools`, `cpufrequtils`, and more.
-*   **Software**: Official Docker CE, Node.js LTS, and Gemini CLI.
-*   **Integration**: Automatically invokes `optimize.sh` at the end of the process.
+*   **Smart Install**: Checks for existing packages to avoid redundant operations.
+*   **USB Detect**: Warns if not booting from USB for optimal performance.
+*   **Dependencies**: Installs `fail2ban`, `ufw`, `rng-tools5`, `busybox-syslogd`, and more.
+*   **Integration**: Automatically invokes `optimize.sh`.
 
 ### ⚡ `optimize.sh` (The Tuner)
-*   **Kernel**: Hardens `sysctl` settings and enables BBR.
-*   **Storage**: Optimizes `fstab` and sets up I/O schedulers.
+*   **Swap**: Removes `dphys-swapfile` and sets `vm.swappiness=1` for minimal swapping.
+*   **Kernel**: Hardens `sysctl` settings, enables BBR, and tunes memory for USB I/O.
 *   **Maintenance**: Prunes Docker, clears documentation, and configures the firewall.
 
 ### 🩺 `diag.sh` (The Auditor)
