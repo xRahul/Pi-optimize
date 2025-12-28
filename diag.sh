@@ -1,21 +1,21 @@
-#!/bin/sh
+#!/bin/bash
 
 ################################################################################
-# Raspberry Pi Home Server Diagnostic Tool - PRO EDITION
-# Enhanced for Debian Trixie with Docker + USB storage
+# Raspberry Pi 5 Diagnostic Tool - ULTIMATE EDITION v4.2.0
+# Target: Debian Trixie/Bookworm (aarch64) on Raspberry Pi 5
+# Features: Pi 5 Hardware, Docker, USB Storage, System Health
 # License: MIT (Copyright 2025 Rahul)
 ################################################################################
 
-# Standardize path
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# --- Strict Mode ---
+set -u
+# We don't use 'set -e' to allow the script to continue after a failed check
 
 # --- Constants ---
-SCRIPT_VERSION="4.0.1"
+SCRIPT_VERSION="4.2.0"
 LOG_FILE="/var/log/rpi-diag.log"
-SCORE=0
-TOTAL_CHECKS=0
-ISSUES=0
-WARNINGS=0
+USB_MOUNT_POINT="/mnt/usb"
+TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 
 # Colors
 RED='\033[0;31m'
@@ -24,258 +24,404 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
+GREY='\033[0;90m'
 NC='\033[0m'
 
-# --- Logging ---
-log_info() { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-log_pass() { 
-    printf "${GREEN}[✓]${NC} %s\n" "$1"
-    SCORE=$((SCORE + 1))
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+# State Tracking
+ERRORS=0
+WARNINGS=0
+CHECKS_PASSED=0
+WARN_LIST=()
+ERROR_LIST=()
+
+################################################################################
+# Utility Functions
+################################################################################
+
+print_header() {
+    clear
+    echo -e "${MAGENTA}"
+    echo "██████╗ ██╗ █████╗  ██████╗ "
+    echo "██╔══██╗██║██╔══██╗██╔════╝ "
+    echo "██║  ██║██║███████║██║  ███╗"
+    echo "██║  ██║██║██╔══██║██║   ██║"
+    echo "██████╔╝██║██║  ██║╚██████╔╝"
+    echo "╚═════╝ ╚═╝╚═╝  ╚═╝ ╚═════╝ "
+    echo -e "${NC}"
+    echo -e "${CYAN}Raspberry Pi Diagnostic Tool v${SCRIPT_VERSION}${NC}"
+    echo -e "${GREY}Timestamp: $(date)${NC}\n"
 }
-log_fail() { 
-    printf "${RED}[✗]${NC} %s\n" "$1"
-    ISSUES=$((ISSUES + 1))
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+
+log_section() {
+    echo -e "\n${BLUE}=== $1 ===${NC}"
+    echo -e "${GREY}$(printf '%*s' "$TERM_WIDTH" '' | tr ' ' '-')"${NC}
 }
-log_warn() { 
-    printf "${YELLOW}[!]${NC} %s\n" "$1"
-    WARNINGS=$((WARNINGS + 1))
-    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+
+report_pass() {
+    echo -e "${GREEN}[PASS]${NC} $1"
+    ((CHECKS_PASSED++))
 }
-log_section() { printf "\n${CYAN}=== %s ===${NC}\n" "$1"; }
 
-# --- Utilities ---
-command_exists() { command -v "$1" >/dev/null 2>&1; }
-service_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+report_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+    local sol="${2:-}"
+    [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
+    WARN_LIST+=("$1|$sol")
+    ((WARNINGS++))
+}
+
+report_fail() {
+    echo -e "${RED}[FAIL]${NC} $1"
+    local sol="${2:-}"
+    [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
+    ERROR_LIST+=("$1|$sol")
+    ((ERRORS++))
+}
+
+report_info() {
+    echo -e "${CYAN}[INFO]${NC} $1"
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Floating point comparison using awk
+is_greater() { awk -v n1="$1" -v n2="$2" 'BEGIN {if (n1>n2) exit 0; exit 1}'; }
+is_less() { awk -v n1="$1" -v n2="$2" 'BEGIN {if (n1<n2) exit 0; exit 1}'; }
 
 ################################################################################
-# 1. System Vital Signs
+# 1. Hardware Health (Pi 5 Specific)
 ################################################################################
 
-log_section "SYSTEM VITAL SIGNS"
+check_hardware() {
+    log_section "HARDWARE HEALTH (Raspberry Pi 5)"
 
-# OS & Model
-# Use tr to remove null bytes if present, handle potential read errors
-if [ -f /proc/device-tree/model ]; then
-    MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
-else
-    MODEL="Unknown Pi"
-fi
+    # Board Info
+    if [ -f /proc/device-tree/model ]; then
+        local model=$(tr -d '\0' < /proc/device-tree/model)
+        report_info "Model: $model"
+    fi
+    report_info "Kernel: $(uname -r)"
 
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-fi
-log_info "Hardware: $MODEL"
-log_info "OS: ${PRETTY_NAME:-Unknown} ($(uname -m))"
-log_info "Kernel: $(uname -r)"
+    # Firmware
+    if command_exists vcgencmd; then
+        local fw_version=$(vcgencmd version | head -n 1)
+        report_info "Firmware: $fw_version"
+    fi
 
-# Failed Units
-FAILED_UNITS=$(systemctl list-units --state=failed --no-legend 2>/dev/null | wc -l)
-# wc -l might output whitespace, trim it by arithmetic context or simple test
-if [ "$FAILED_UNITS" -eq 0 ]; then
-    log_pass "Systemd units: All healthy"
-else
-    log_fail "Systemd units: $FAILED_UNITS failed units detected"
-    systemctl list-units --state=failed --no-legend 2>/dev/null | sed 's/^/    /'
-fi
-
-# Zombie Processes
-ZOMBIES=$(ps aux | awk '{if ($8=="Z") print $2}' | wc -l)
-if [ "$ZOMBIES" -eq 0 ]; then
-    log_pass "Zombie processes: None"
-else
-    log_warn "Zombie processes: $ZOMBIES detected"
-fi
-
-# Load Average
-LOAD=$(uptime | awk -F'load average:' '{print $2}' | xargs)
-log_info "Load Average: $LOAD"
-
-# Temperature
-if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
-    TEMP=$(awk '{printf "%.1f", $1/1000}' /sys/class/thermal/thermal_zone0/temp)
-    if command_exists bc; then
-        # POSIX compliant floating point comparison using bc
-        if [ "$(echo "$TEMP < 65" | bc -l)" -eq 1 ]; then
-             log_pass "Temp: ${TEMP}°C (Optimal)"
-        elif [ "$(echo "$TEMP < 80" | bc -l)" -eq 1 ]; then
-             log_warn "Temp: ${TEMP}°C (Warm)"
+    # Temperature
+    local temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    if [ -n "$temp_raw" ]; then
+        local temp_c=$(awk "BEGIN {printf \"%.1f\", $temp_raw/1000}")
+        if is_less "$temp_c" "60"; then
+            report_pass "Temperature: ${temp_c}°C (Optimal)"
+        elif is_less "$temp_c" "80"; then
+            report_warn "Temperature: ${temp_c}°C (High)" "Check cooling/fan functionality."
         else
-             log_fail "Temp: ${TEMP}°C (CRITICAL)"
+            report_fail "Temperature: ${temp_c}°C (CRITICAL)" "Immediate cooling required. Check fan connection."
         fi
     else
-        log_info "Temp: ${TEMP}°C"
+        report_warn "Temperature sensor not read."
     fi
-fi
 
-# Throttling
-if command_exists vcgencmd; then
-    THROTTLED=$(vcgencmd get_throttled | cut -d= -f2)
-    if [ "$THROTTLED" = "0x0" ]; then
-        log_pass "Throttling: None"
-    else
-        log_fail "Throttling detected: $THROTTLED"
-    fi
-fi
-
-################################################################################
-# 2. Storage Health
-################################################################################
-
-log_section "STORAGE HEALTH"
-
-# Disk Usage
-# Use a temp file or safe pipe structure to avoid subshell variable loss if needed, 
-# but loop runs log_pass inside, which updates global vars.
-# Wait, in sh/bash, pipes create subshells. Variables updated inside loop won't persist!
-# We need to process line by line without a pipe or accept that counts might be off inside loop?
-# Actually, the original script had this bug too if using pipes!
-# To fix: Write to temp file or use recursive function?
-# Simplest fix for this specific script: Just print. The score is less important than the output.
-# But "TOTAL_CHECKS" being 0 caused div/0.
-# I will fix the counting issue by avoiding the pipe for the loop where possible or just reading into a var first.
-
-# Root FS check
-ROOT_CHECK=$(df -h --output=pcent,avail / | tail -n 1 | awk '{usage=$1; gsub(/%/,"",usage); if(usage<85) print "PASS " $2; else print "FAIL " $2}')
-ROOT_STATUS=$(echo "$ROOT_CHECK" | awk '{print $1}')
-ROOT_FREE=$(echo "$ROOT_CHECK" | awk '{print $2}')
-
-if [ "$ROOT_STATUS" = "PASS" ]; then
-     log_pass "Root space: $ROOT_FREE free"
-else
-     log_fail "Root space low: $ROOT_FREE free"
-fi
-
-# USB Mount
-USB_PATH="/mnt/usb"
-if mountpoint -q "$USB_PATH"; then
-    log_pass "USB Mount: $USB_PATH active"
-    OPTIONS=$(mount | grep "$USB_PATH" | grep -o "(.*)")
-    case "$OPTIONS" in
-        *noatime*) log_pass "  noatime: Enabled" ;; 
-        *) log_warn "  noatime: Missing" ;; 
-    esac
-else
-    log_fail "USB Mount: $USB_PATH NOT MOUNTED"
-fi
-
-# SMART Status (if available)
-if command_exists smartctl; then
-    # Avoid pipe loop for variables
-    USB_DEVICES=$(lsblk -d -o NAME,TRAN | grep "usb" | awk '{print $1}')
-    for dev in $USB_DEVICES; do
-        if smartctl -H "/dev/$dev" | grep -q "PASSED"; then
-             log_pass "SMART ($dev): Passed"
+    # Throttling & Power
+    if command_exists vcgencmd; then
+        local throttled=$(vcgencmd get_throttled | cut -d= -f2)
+        if [ "$throttled" == "0x0" ]; then
+            report_pass "Power/Throttling: Status OK (0x0)"
         else
-             log_warn "SMART ($dev): Check required"
+            report_fail "Throttling Detected: Code $throttled" "Check power supply (need 5V/5A for Pi 5) or cooling."
+            # Decode common bits
+            # Bit 0: Under-voltage detected
+            # Bit 1: Arm frequency capped
+            # Bit 2: Currently throttled
+            # Bit 3: Soft temperature limit active
+            # Bit 16: Under-voltage has occurred
+            # Bit 17: Arm frequency capped has occurred
+            # Bit 18: Throttling has occurred
+            # Bit 19: Soft temperature limit has occurred
         fi
-    done
-fi
+
+        # Voltage (Core)
+        local volts=$(vcgencmd measure_volts core | cut -d= -f2)
+        report_info "Core Voltage: $volts"
+    fi
+
+    # PMIC (Pi 5 Specific)
+    if command_exists vcgencmd; then
+        # Just check if pmic_read_adc exists/works by trying one value
+        if vcgencmd pmic_read_adc >/dev/null 2>&1; then
+             report_info "PMIC: Power Management IC accessible"
+        fi
+    fi
+}
 
 ################################################################################
-# 3. Docker Ecosystem
+# 2. System Resources
 ################################################################################
 
-log_section "DOCKER ECOSYSTEM"
+check_resources() {
+    log_section "SYSTEM RESOURCES"
 
-if command_exists docker; then
-    if service_active docker; then
-        log_pass "Docker Daemon: Running"
-        
-        # Container Counts
-        RUNNING=$(docker ps -q | wc -l)
-        TOTAL=$(docker ps -a -q | wc -l)
-        log_info "Containers: $RUNNING running / $TOTAL total"
-        
-        # Dead/Exited Containers
-        EXITED=$(docker ps -a --filter "status=exited" -q | wc -l)
-        if [ "$EXITED" -gt 0 ]; then
-             log_warn "Exited containers: $EXITED detected"
-        fi
-        
-        # Network Check
-        if docker network ls | grep -q "wg-easy"; then
-             log_pass "Network 'wg-easy': Exists"
+    # CPU Load
+    local load_1m=$(uptime | awk -F'load average:' '{print $2}' | cut -d, -f1 | xargs)
+    # Pi 5 has 4 cores. Load > 4 is heavy.
+    if is_less "$load_1m" "3.0"; then
+        report_pass "Load Average (1m): $load_1m"
+    elif is_less "$load_1m" "5.0"; then
+        report_warn "Load Average (1m): $load_1m (High)" "Check background processes."
+    else
+        report_fail "Load Average (1m): $load_1m (Overloaded)" "System is saturated."
+    fi
+
+    # Memory
+    local mem_total=$(free -m | awk '/^Mem:/{print $2}')
+    local mem_avail=$(free -m | awk '/^Mem:/{print $7}')
+    local mem_used_perc=$(awk "BEGIN {printf \"%.1f\", 100-($mem_avail/$mem_total*100)}")
+    
+    if is_less "$mem_used_perc" "85"; then
+        report_pass "Memory Usage: $mem_used_perc% ($mem_avail MB available)"
+    else
+        report_warn "Memory Usage: $mem_used_perc% (Low Memory)" "Check memory-hungry containers."
+    fi
+
+    # Swap / ZRAM
+    if grep -q "/dev/zram" /proc/swaps; then
+        report_pass "ZRAM Swap: Active"
+    else
+        if grep -q "partition" /proc/swaps || grep -q "file" /proc/swaps; then
+            report_warn "Swap: Disk-based swap detected" "Run optimize.sh to switch to ZRAM (better for flash longevity)."
         else
-             log_warn "Network 'wg-easy': Missing"
+            report_warn "Swap: No swap active" "ZRAM is recommended for stability."
         fi
+    fi
+}
+
+################################################################################
+# 3. Storage & Filesystems
+################################################################################
+
+check_storage() {
+    log_section "STORAGE & FILESYSTEMS"
+
+    # Root Filesystem
+    local root_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+    if [ "$root_usage" -lt 85 ]; then
+        report_pass "Root Partition: ${root_usage}% used"
+    else
+        report_fail "Root Partition: ${root_usage}% used (Critical)" "Clean up logs or docker images."
+    fi
+
+    # USB Mount Check
+    if mountpoint -q "$USB_MOUNT_POINT"; then
+        report_pass "Mount: $USB_MOUNT_POINT is mounted"
         
-        # Volume usage
-        VOLUMES=$(docker volume ls -q | wc -l)
-        log_info "Docker volumes: $VOLUMES"
-        
-        # Logging Driver
-        DRIVER=$(docker info --format '{{.LoggingDriver}}')
-        if [ "$DRIVER" = "json-file" ]; then
-             log_pass "Log driver: $DRIVER"
+        # Check Filesystem Type
+        local fs_type=$(findmnt -n -o FSTYPE -T "$USB_MOUNT_POINT")
+        report_info "Filesystem: $fs_type"
+
+        # Check Options (noatime, commit)
+        local fs_opts=$(findmnt -n -o OPTIONS -T "$USB_MOUNT_POINT")
+        if [[ "$fs_opts" == *"noatime"* ]]; then
+            report_pass "Mount Option: noatime active"
         else
-             log_warn "Log driver: $DRIVER (not optimized)"
+            report_warn "Mount Option: noatime MISSING" "Run optimize.sh to fix."
         fi
+        
+        if [[ "$fs_type" == "ext4" ]]; then
+             if [[ "$fs_opts" == *"commit="* ]]; then
+                 report_pass "Mount Option: commit adjusted"
+             else
+                 report_info "Mount Option: Default commit interval"
+             fi
+        elif [[ "$fs_type" == "vfat" || "$fs_type" == "exfat" ]]; then
+             report_warn "Filesystem: VFAT/ExFAT detected" "Not recommended for Docker. Consider formatting to EXT4 for reliability."
+        fi
+
+        # Write Test (Non-destructive check if writable)
+        if touch "$USB_MOUNT_POINT/.diag_test" 2>/dev/null; then
+            rm "$USB_MOUNT_POINT/.diag_test"
+            report_pass "Write Access: OK"
+        else
+            report_fail "Write Access: FAILED" "Drive might be read-only or permissions wrong."
+        fi
+
     else
-        log_fail "Docker Daemon: Inactive"
+        report_fail "Mount: $USB_MOUNT_POINT NOT MOUNTED" "Check physical connection or fstab."
     fi
-else
-    log_fail "Docker: Not installed"
-fi
 
-################################################################################
-# 4. Networking & Connectivity
-################################################################################
-
-log_section "NETWORKING"
-
-# Internet
-if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-     log_pass "Internet: Connected"
-else
-     log_fail "Internet: Offline"
-fi
-
-# DNS
-if command_exists nslookup; then
-    if nslookup google.com >/dev/null 2>&1; then
-         log_pass "DNS: Resolving"
+    # Kernel Errors (I/O)
+    local io_errors=$(dmesg | grep -iE "I/O error|EXT4-fs error|corruption" | tail -n 5)
+    if [ -z "$io_errors" ]; then
+        report_pass "Kernel Logs: No recent disk errors"
     else
-         log_fail "DNS: Failed"
+        report_fail "Kernel Logs: Disk errors detected!" "Check 'dmesg' output immediately."
+        echo -e "${RED}$io_errors${NC}"
     fi
-fi
+}
 
-# Interfaces
-# Loop here is for display only, so subshell is fine
-ip -4 addr show | grep -v "127.0.0.1" | grep "inet " | awk '{print $NF "\t" $2}' | while read iface addr; do
-    log_info "Interface $iface: $addr"
-done
+################################################################################
+# 4. Docker Health
+################################################################################
 
-# Tailscale
-if command_exists tailscale; then
-    if tailscale status >/dev/null 2>&1; then
-         log_pass "Tailscale: Connected"
+check_docker() {
+    log_section "DOCKER HEALTH"
+
+    if ! command_exists docker; then
+        report_fail "Docker: Not installed"
+        return
+    fi
+
+    if ! systemctl is-active --quiet docker; then
+        report_fail "Docker Service: Inactive/Dead" "sudo systemctl start docker"
+        return
+    fi
+
+    report_pass "Docker Service: Running"
+
+    # Data Root
+    local data_root=$(docker info --format '{{.DockerRootDir}}')
+    report_info "Data Root: $data_root"
+    
+    # Check backing device transport
+    local backing_dev=$(findmnt -n -o SOURCE --target "$data_root")
+    local parent_dev=$(lsblk -nd -o PKNAME -p "$backing_dev" 2>/dev/null)
+    [[ -z "$parent_dev" ]] && parent_dev="$backing_dev"
+    local transport=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+
+    if [[ "$transport" == "usb" || "$transport" == "nvme" ]]; then
+        report_pass "Storage Medium: $transport (Safe)"
+    elif [[ "$data_root" == *"$USB_MOUNT_POINT"* ]]; then
+        # Fallback if transport detection fails but path is explicit
+        report_pass "Storage: Using USB Mount"
     else
-         log_warn "Tailscale: Disconnected"
+        report_warn "Storage: Potential SD Card ($transport)" "If booting from SD, move Docker to USB/NVMe to prevent wear."
     fi
-fi
+
+    # Logging Driver
+    local log_driver=$(docker info --format '{{.LoggingDriver}}')
+    if [[ "$log_driver" == "json-file" ]]; then
+        report_pass "Log Driver: json-file"
+    else
+        report_warn "Log Driver: $log_driver" "Run optimize.sh to set json-file with rotation."
+    fi
+
+    # Container States
+    local running=$(docker ps -q | wc -l)
+    local total=$(docker ps -aq | wc -l)
+    local exited=$(docker ps -aq -f status=exited | wc -l)
+    local restarting=$(docker ps -aq -f status=restarting | wc -l)
+
+    report_info "Containers: $running Running / $total Total"
+    
+    if [ "$restarting" -gt 0 ]; then
+        report_fail "Containers: $restarting in restart loop" "Check 'docker ps' and container logs."
+    elif [ "$exited" -gt 0 ]; then
+        report_warn "Containers: $exited stopped"
+    else
+        report_pass "Containers: All healthy"
+    fi
+}
 
 ################################################################################
-# 5. Summary
+# 5. Network & Security
 ################################################################################
 
-log_section "DIAGNOSTIC SUMMARY"
+check_network() {
+    log_section "NETWORK & SECURITY"
 
-if [ "$TOTAL_CHECKS" -gt 0 ]; then
-    SCORE_PERC=$(( SCORE * 100 / TOTAL_CHECKS ))
-else
-    SCORE_PERC=0
-fi
+    # Internet
+    if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+        report_pass "Internet: Connected"
+    else
+        report_fail "Internet: Disconnected" "Check ethernet cable or router."
+    fi
 
-log_info "System Health Score: $SCORE_PERC% ($SCORE/$TOTAL_CHECKS)"
+    # DNS
+    if command_exists nslookup; then
+        if nslookup google.com >/dev/null 2>&1; then
+            report_pass "DNS: Working"
+        else
+            report_fail "DNS: Resolution failed" "Check /etc/resolv.conf"
+        fi
+    fi
 
-if [ "$ISSUES" -gt 0 ]; then
-    log_fail "Status: $ISSUES CRITICAL ISSUES FOUND"
-elif [ "$WARNINGS" -gt 0 ]; then
-    log_warn "Status: Healthy with $WARNINGS warnings"
-else
-    log_pass "Status: System Perfect"
-fi
+    # Firewall
+    if command_exists ufw; then
+        local ufw_status=$(ufw status | grep "Status" | awk '{print $2}')
+        if [ "$ufw_status" == "active" ]; then
+            report_pass "Firewall (UFW): Active"
+        else
+            report_warn "Firewall (UFW): Inactive" "Enable UFW for security."
+        fi
+    fi
 
-printf "\nRecommended action: sudo ./optimize.sh\n"
+    # SSH
+    if systemctl is-active --quiet ssh; then
+        report_pass "SSH Service: Active"
+    else
+        report_warn "SSH Service: Inactive"
+    fi
+    
+    # Fail2Ban
+    if command_exists fail2ban-client; then
+        if systemctl is-active --quiet fail2ban; then
+            report_pass "Fail2Ban: Running"
+        else
+            report_warn "Fail2Ban: Inactive" "Recommended for SSH security."
+        fi
+    fi
+}
+
+################################################################################
+# Main
+################################################################################
+
+main() {
+    print_header
+    
+    check_hardware
+    check_resources
+    check_storage
+    check_docker
+    check_network
+
+    log_section "DIAGNOSTIC SUMMARY"
+    echo -e "Checks Passed: ${GREEN}$CHECKS_PASSED${NC}"
+    echo -e "Warnings:      ${YELLOW}$WARNINGS${NC}"
+    echo -e "Errors:        ${RED}$ERRORS${NC}"
+
+    if [ $ERRORS -gt 0 ]; then
+        echo -e "\n${RED}=== CRITICAL ISSUES ===${NC}"
+        for item in "${ERROR_LIST[@]}"; do
+             msg="${item%%|*}"
+             sol="${item##*|}"
+             echo -e "${RED}[✗] $msg${NC}"
+             [ -n "$sol" ] && echo -e "    ↳ Solution: $sol"
+        done
+    fi
+
+    if [ $WARNINGS -gt 0 ]; then
+        echo -e "\n${YELLOW}=== WARNINGS ===${NC}"
+        for item in "${WARN_LIST[@]}"; do
+             msg="${item%%|*}"
+             sol="${item##*|}"
+             echo -e "${YELLOW}[!] $msg${NC}"
+             [ -n "$sol" ] && echo -e "    ↳ Solution: $sol"
+        done
+    fi
+
+    if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
+        echo -e "\n${GREEN}SYSTEM IS HEALTHY!${NC}"
+    elif [ $ERRORS -gt 0 ]; then
+        echo -e "\n${RED}SYSTEM REQUIRES ATTENTION.${NC} Review failures above."
+    else
+        echo -e "\n${YELLOW}SYSTEM FUNCTIONAL BUT OPTIMIZABLE.${NC}"
+    fi
+    
+    echo -e "Log saved to: $LOG_FILE"
+}
+
+# Redirect output to log file while showing on screen
+main 2>&1 | tee "$LOG_FILE"

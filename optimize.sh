@@ -388,7 +388,10 @@ setup_usb_automount() {
         
         # Add appropriate mount options based on filesystem
         local mount_opts="defaults,nofail,noatime"
-        if [[ "$fs_type" == "vfat" || "$fs_type" == "exfat" ]]; then
+        if [[ "$fs_type" == "ext4" ]]; then
+            # Optimization for flash storage: commit=60 reduces write frequency
+            mount_opts="defaults,nofail,noatime,commit=60"
+        elif [[ "$fs_type" == "vfat" || "$fs_type" == "exfat" ]]; then
             mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,umask=002,utf8"
         fi
         
@@ -451,11 +454,13 @@ optimize_docker() {
         if [[ "$fs_type" == "msdos" || "$fs_type" == "vfat" || "$fs_type" == "exfat" || "$fs_type" == "fuseblk" ]]; then
              log_warn "USB mount /mnt/usb is $fs_type (incompatible with Docker data-root). Skipping data-root optimization."
         else
-            if [[ -d "/mnt/usb/docker" ]] || mkdir -p /mnt/usb/docker; then
+            if [[ -d "/mnt/usb/docker" ]]; then
                 if command_exists jq; then
                     final_config=$(echo "$final_config" | jq '. + {"data-root": "/mnt/usb/docker"}')
                 fi
-                log_info "Configuring Docker to use /mnt/usb/docker"
+                log_info "Configuring Docker to use existing /mnt/usb/docker"
+            else
+                log_skip "Directory /mnt/usb/docker not found. Skipping data-root move to prevent data modification."
             fi
         fi
     fi

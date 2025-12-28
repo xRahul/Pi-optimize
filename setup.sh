@@ -91,7 +91,10 @@ preflight_checks() {
 
     # Boot Drive Detection
     local boot_dev=$(findmnt -n -o SOURCE /)
-    local boot_tran=$(lsblk -no TRAN "$(lsblk -no PKNAME "$boot_dev" 2>/dev/null || echo "$boot_dev")" 2>/dev/null | head -n1)
+    # Get parent disk if partition, otherwise use device itself. Use -d to suppress children, -p for full path.
+    local parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
+    [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
+    local boot_tran=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
     
     if [[ "$boot_tran" == "usb" ]]; then
         log_pass "Boot Drive: USB Flash/SSD detected"
