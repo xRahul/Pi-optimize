@@ -39,10 +39,10 @@ ERRORS=0
 ################################################################################
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
-log_pass() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_APPLIED++)); }
-log_skip() { echo -e "${YELLOW}[⊘]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_SKIPPED++)); }
-log_warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; ((WARNINGS++)); }
-log_error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; ((ERRORS++)); }
+log_pass() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_APPLIED+=1)); }
+log_skip() { echo -e "${YELLOW}[⊘]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_SKIPPED+=1)); }
+log_warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; ((WARNINGS+=1)); }
+log_error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; ((ERRORS+=1)); }
 log_section() { echo -e "\n${CYAN}=== $1 ===${NC}" | tee -a "$LOG_FILE"; }
 log_success() { echo -e "\n${GREEN}$1${NC}" | tee -a "$LOG_FILE"; }
 
@@ -108,6 +108,8 @@ optimize_hardware() {
         log_skip "Fan curve already configured"
     else
         log_info "Applying aggressive fan curve (35°C start)..."
+        # Ensure newline before appending
+        echo "" >> "$CONFIG_FILE"
         cat >> "$CONFIG_FILE" << 'EOF'
 
 # Active Cooling for Pi 5
@@ -151,13 +153,22 @@ EOF
 optimize_cpu() {
     log_section "CPU & PERFORMANCE"
     
-    # Set governor to performance
-    if command_exists cpufreq-set; then
-        cpufreq-set -g performance || log_warn "Failed to set performance governor"
-        log_pass "CPU governor set to performance"
-    elif [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-        echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
-        log_pass "CPU governor set to performance (sysfs)"
+    local current_gov=""
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        current_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+    fi
+
+    if [[ "$current_gov" == "performance" ]]; then
+        log_skip "CPU governor already set to performance"
+    else
+        # Set governor to performance
+        if command_exists cpufreq-set; then
+            cpufreq-set -g performance || log_warn "Failed to set performance governor"
+            log_pass "CPU governor set to performance"
+        elif [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
+            log_pass "CPU governor set to performance (sysfs)"
+        fi
     fi
 
     # Persistent Governor via cpufrequtils
@@ -165,6 +176,8 @@ optimize_cpu() {
         if ! grep -q 'GOVERNOR="performance"' /etc/default/cpufrequtils; then
             echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
             log_pass "Persistent CPU governor: performance"
+        else
+            log_skip "Persistent CPU governor already configured"
         fi
     fi
 }
@@ -190,13 +203,16 @@ optimize_storage() {
 
     # 2. I/O Scheduler (BFQ for USB/SD)
     log_info "Configuring BFQ scheduler..."
-    local devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd" | awk '{print $1}' || echo "")
+    local devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd|mmc" | awk '{print $1}' || echo "")
     if [[ -z "$devices" ]]; then
-        log_skip "No USB/SD devices found for I/O scheduler optimization"
+        log_skip "No USB/SD/MMC devices found for I/O scheduler optimization"
     else
         for dev in $devices; do
             if [[ -f "/sys/block/$dev/queue/scheduler" ]]; then
-                if grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
+                # Check if BFQ is selected (surrounded by brackets)
+                if grep -q "\[bfq\]" "/sys/block/$dev/queue/scheduler"; then
+                    log_skip "BFQ already active for $dev"
+                elif grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
                     echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
                 else
                     log_skip "BFQ not available for $dev"
@@ -207,8 +223,12 @@ optimize_storage() {
 
     # 3. fstrim for SSDs (if applicable)
     if systemctl list-unit-files | grep -q fstrim.timer; then
-        systemctl enable --now fstrim.timer >/dev/null 2>&1
-        log_pass "Fstrim timer enabled"
+        if systemctl is-active --quiet fstrim.timer; then
+            log_skip "Fstrim timer already active"
+        else
+            systemctl enable --now fstrim.timer >/dev/null 2>&1
+            log_pass "Fstrim timer enabled"
+        fi
     fi
 }
 
@@ -220,6 +240,10 @@ optimize_kernel() {
     log_section "KERNEL TUNING"
     
     local sysctl_conf="/etc/sysctl.d/99-server-optimize.conf"
+    
+    # Check if file exists and verify checksum/content to avoid redundant writes/backups?
+    # For simplicity, we'll just backup and write. But we can silence the log if no change.
+    
     backup_file "$sysctl_conf"
 
     cat > "$sysctl_conf" << 'EOF'
@@ -284,8 +308,20 @@ setup_usb_automount() {
     fi
     
     # Check if USB device needs to be added to fstab
-    # Look for USB devices
-    local usb_device=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep "usb" | awk '{print $1}' | head -1)
+    
+    # Identify root device to exclude it
+    local root_dev=$(findmnt -n -o SOURCE /)
+    local root_disk=$(lsblk -no PKNAME "$root_dev" 2>/dev/null || echo "$root_dev")
+    # Clean up root_disk (remove /dev/ prefix if present)
+    root_disk=$(basename "$root_disk")
+
+    # Look for USB/SD/MMC PARTITIONS, excluding root disk
+    # We want partitions (TYPE="part") on specific transports (TRAN="usb" etc)
+    local usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
+        grep -E "usb|sd|mmc" | \
+        grep "part" | \
+        grep -v "$root_disk" | \
+        awk '{print $1}' | head -1)
     
     if [[ -z "$usb_device" ]]; then
         log_warn "No USB device detected. Manual fstab configuration may be required."
@@ -322,6 +358,9 @@ setup_usb_automount() {
         
         echo "UUID=$usb_uuid  $mount_path  $fs_type  $mount_opts  0  2" >> "$fstab_file"
         log_pass "USB mount added to fstab (UUID: $usb_uuid, Type: $fs_type)"
+        
+        # Attempt to mount immediately so subsequent checks pass
+        mount "$mount_path" 2>/dev/null || true
     fi
     
     # Create systemd mount override to ensure Docker waits
@@ -352,56 +391,66 @@ optimize_docker() {
     local docker_config="/etc/docker/daemon.json"
     backup_file "$docker_config"
 
-    # Robust JSON generation
-    local config_content='{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
-  "live-restore": true,
-  "userland-proxy": false,
-  "no-new-privileges": true,
-  "features": { "buildkit": true },
-  "default-ulimits": {
-    "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 }
-  }
-}'
+    # Base configuration to apply
+    local base_config='{
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+      },
+      "live-restore": true,
+      "userland-proxy": false,
+      "no-new-privileges": true,
+      "features": { "buildkit": true },
+      "default-ulimits": {
+        "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 }
+      }
+    }'
 
     # Check for USB mount and add data-root if necessary
+    local final_config="$base_config"
     if mountpoint -q /mnt/usb; then
-        if [[ -d "/mnt/usb/docker" ]] || mkdir -p /mnt/usb/docker; then
-            if command_exists jq; then
-                config_content=$(echo "$config_content" | jq '. + {"data-root": "/mnt/usb/docker"}')
-            else
-                # Fallback simple append if jq missing (less robust but works for fresh install)
-                config_content=$(echo "$config_content" | sed 's/}/  ,"data-root": "\/mnt\/usb\/docker"\n}/')
+        # Check filesystem type compatibility
+        local fs_type=$(stat -f -c %T /mnt/usb 2>/dev/null || echo "unknown")
+        if [[ "$fs_type" == "msdos" || "$fs_type" == "vfat" || "$fs_type" == "exfat" || "$fs_type" == "fuseblk" ]]; then
+             log_warn "USB mount /mnt/usb is $fs_type (incompatible with Docker data-root). Skipping data-root optimization."
+        else
+            if [[ -d "/mnt/usb/docker" ]] || mkdir -p /mnt/usb/docker; then
+                if command_exists jq; then
+                    final_config=$(echo "$final_config" | jq '. + {"data-root": "/mnt/usb/docker"}')
+                fi
+                log_info "Configuring Docker to use /mnt/usb/docker"
             fi
-            log_info "Configuring Docker to use /mnt/usb/docker"
         fi
     fi
 
-    echo "$config_content" > "$docker_config"
-    log_pass "Docker daemon.json optimized"
-
-    # Systemd Override for performance tuning
-    mkdir -p /etc/systemd/system/docker.service.d
-    if [[ ! -f /etc/systemd/system/docker.service.d/performance.conf ]]; then
-        cat > /etc/systemd/system/docker.service.d/performance.conf << 'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/dockerd --log-level=warn
-TasksMax=infinity
-LimitNOFILE=infinity
-LimitNPROC=infinity
-EOF
-        log_pass "Docker performance overrides applied"
+    # Merge or Write
+    if [[ -f "$docker_config" ]]; then
+        if command_exists jq; then
+            # Idempotency Check: Compare existing vs new (merged)
+            local current_json=$(jq -S . "$docker_config")
+            local new_json=$(jq -s '.[0] * .[1]' "$docker_config" <(echo "$final_config") | jq -S .)
+            
+            if [[ "$current_json" == "$new_json" ]]; then
+                log_skip "Docker daemon.json already optimized"
+            else
+                log_info "Merging with existing daemon.json..."
+                echo "$new_json" > "$docker_config"
+                log_pass "Docker daemon.json optimized (merged)"
+                
+                systemctl daemon-reload
+                systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
+            fi
+        else
+            log_warn "jq not found. Skipping Docker config merge to prevent data loss."
+        fi
     else
-        log_skip "Docker performance overrides already configured"
+        echo "$final_config" > "$docker_config"
+        log_pass "Docker daemon.json optimized (created)"
+        
+        systemctl daemon-reload
+        systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
     fi
-    
-    systemctl daemon-reload
-    systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
 }
 
 ################################################################################
@@ -413,17 +462,26 @@ optimize_memory() {
 
     # ZRAM setup (Generic via zram-tools if available)
     if [[ -f /etc/default/zramswap ]]; then
-        sed -i 's/ALGO=.*/ALGO=zstd/' /etc/default/zramswap
-        sed -i 's/PERCENT=.*/PERCENT=60/' /etc/default/zramswap
-        systemctl restart zramswap 2>/dev/null || true
-        log_pass "ZRAM tuned: zstd, 60%"
+        if grep -q "ALGO=zstd" /etc/default/zramswap && grep -q "PERCENT=60" /etc/default/zramswap; then
+            log_skip "ZRAM already configured (zstd, 60%)"
+        else
+            sed -i 's/ALGO=.*/ALGO=zstd/' /etc/default/zramswap
+            sed -i 's/PERCENT=.*/PERCENT=60/' /etc/default/zramswap
+            systemctl restart zramswap 2>/dev/null || true
+            log_pass "ZRAM tuned: zstd, 60%"
+        fi
     fi
 
     # Disable traditional swap if ZRAM is active
     if [[ -f /sys/block/zram0/disksize ]]; then
-        if swapon --show | grep -qv "zram"; then
+        # Identify non-zram swap devices (ignoring header)
+        local other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
+        
+        if [[ -n "$other_swaps" ]]; then
             log_info "Disabling disk-based swap..."
-            swapoff -a 2>/dev/null || true
+            for s in $other_swaps; do
+                swapoff "$s" 2>/dev/null || true
+            done
             # Comment out swap in fstab
             sed -i '/\sswap\s/ s/^/#/' /etc/fstab
             log_pass "Traditional swap disabled"

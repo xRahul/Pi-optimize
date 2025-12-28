@@ -79,7 +79,7 @@ preflight_checks() {
 system_core() {
     log_section "SYSTEM CORE"
     
-    apt update && apt full-upgrade -y || log_error "Apt upgrade failed"
+    apt-get update && apt-get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
     
     local packages=(
@@ -92,7 +92,7 @@ system_core() {
     for pkg in "${packages[@]}"; do
         if ! dpkg -l | grep -q "^ii.*${pkg}"; then
             log_info "Installing $pkg..."
-            apt install -y "$pkg" || log_warn "Failed: $pkg"
+            apt-get install -y "$pkg" || log_warn "Failed: $pkg"
         fi
     done
     log_pass "Core dependencies installed"
@@ -112,8 +112,18 @@ docker_suite() {
     
     systemctl enable --now docker
     
-    local target_user="${SUDO_USER:-$USER}"
-    [[ "$target_user" != "root" ]] && usermod -aG docker "$target_user" && log_pass "User $target_user added to docker group"
+    # Detect target user (SUDO_USER, or UID 1000, or current user)
+    local target_user="${SUDO_USER:-}"
+    if [[ -z "$target_user" ]]; then
+        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
+        log_warn "SUDO_USER not set. Defaulting to user: $target_user"
+    fi
+
+    if [[ "$target_user" != "root" ]]; then
+        usermod -aG docker "$target_user" && log_pass "User $target_user added to docker group"
+    else
+         log_skip "Skipping docker group add for root"
+    fi
 }
 
 ################################################################################
@@ -125,12 +135,16 @@ nodejs_tooling() {
     
     if ! command_exists node; then
         curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-        apt install -y nodejs
+        apt-get install -y nodejs
     fi
     log_pass "Node.js: $(node -v)"
     
     # Global npm config for non-root
-    local target_user="${SUDO_USER:-$USER}"
+    local target_user="${SUDO_USER:-}"
+    if [[ -z "$target_user" ]]; then
+        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
+    fi
+
     if [[ "$target_user" != "root" ]]; then
         local target_home=$(getent passwd "$target_user" | cut -d: -f6)
         local npm_global="$target_home/.npm-global"
@@ -176,6 +190,42 @@ usb_optimization() {
         log_pass "USB mount verified in fstab"
     else
         log_warn "USB mount not found in fstab - may need manual configuration"
+    fi
+
+    # Configure forced mount on startup (runs before Docker)
+    local service_file="/etc/systemd/system/startup-mounts.service"
+    
+    # Check if service exists and has correct content (simple check)
+    if [[ -f "$service_file" ]] && grep -q "Before=docker.service" "$service_file"; then
+        log_skip "Startup mount service already configured"
+    else
+        log_info "Configuring startup mount service..."
+        cat > "$service_file" << 'EOF'
+[Unit]
+Description=Force Mount All Filesystems
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mount -a
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        log_pass "Startup mount service created"
+        systemctl daemon-reload
+    fi
+
+    if systemctl is-enabled --quiet startup-mounts.service; then
+        log_skip "Startup mount service already enabled"
+    else
+        if systemctl enable startup-mounts.service 2>/dev/null; then
+            log_pass "Startup mount service enabled"
+        else
+            log_warn "Failed to enable startup-mounts.service"
+        fi
     fi
 }
 
