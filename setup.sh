@@ -54,6 +54,24 @@ confirm_action() {
     done
 }
 
+wait_for_apt_lock() {
+    local locks=("/var/lib/dpkg/lock-frontend" "/var/lib/dpkg/lock" "/var/lib/apt/lists/lock")
+    local i=0
+    
+    for lock in "${locks[@]}"; do
+        while fuser "$lock" >/dev/null 2>&1; do
+            if [ $i -eq 0 ]; then
+                log_info "Waiting for apt lock release..."
+            fi
+            sleep 1
+            ((i++))
+            if [ $i -gt 300 ]; then
+                log_error "Timed out waiting for apt lock. Is another install running?"
+            fi
+        done
+    done
+}
+
 ################################################################################
 # 1. Pre-flight Checks
 ################################################################################
@@ -89,6 +107,7 @@ preflight_checks() {
 system_core() {
     log_section "SYSTEM CORE"
     
+    wait_for_apt_lock
     apt-get update && apt-get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
     

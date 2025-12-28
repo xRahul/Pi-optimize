@@ -205,13 +205,14 @@ optimize_storage() {
     
     backup_file /etc/fstab
 
-    # 1. Root noatime optimization (More robust regex)
+    # 1. Root noatime optimization
     if grep -E "^[^#].*\s/\s.*\bnoatime\b" /etc/fstab >/dev/null; then
         log_skip "Root filesystem already has noatime"
     else
         log_info "Adding noatime to root filesystem..."
-        # Target the root mount entry specifically
-        sed -i '/[[:space:]]\/[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
+        # Safely append ,noatime to the options field (4th field) of the root mount
+        # Matches: (Start) (device) (mountpoint /) (fs) (options) (dump) (pass)
+        sed -i -E 's/^([^#]\S+\s+\/\s+\S+\s+)(\S+)/\1\2,noatime/' /etc/fstab
         log_pass "Root filesystem optimized: noatime"
     fi
 
@@ -356,9 +357,11 @@ setup_usb_automount() {
         return
     fi
     
-    # Check if already in fstab
+    # Check if already in fstab by UUID or Mount Point
     if grep -q "UUID=$usb_uuid" "$fstab_file"; then
         log_skip "USB mount already configured in fstab (UUID: $usb_uuid)"
+    elif grep -q "[[:space:]]$mount_path[[:space:]]" "$fstab_file"; then
+        log_warn "Mount point $mount_path already exists in fstab with a different UUID. Skipping to avoid conflicts."
     else
         backup_file "$fstab_file"
         
