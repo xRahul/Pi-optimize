@@ -144,6 +144,20 @@ EOF
     if command_exists systemctl; then
         systemctl enable --now watchdog 2>/dev/null || log_warn "Watchdog service failed to start"
     fi
+
+    # USB Autosuspend (Vital for USB Boot/Storage)
+    local cmdline_file="/boot/firmware/cmdline.txt"
+    if [[ -f "$cmdline_file" ]]; then
+        if grep -q "usbcore.autosuspend=-1" "$cmdline_file"; then
+            log_skip "USB autosuspend already disabled"
+        else
+            # Append to the end of the line, keeping it on one line
+            sed -i 's/$/ usbcore.autosuspend=-1/' "$cmdline_file"
+            log_pass "USB autosuspend disabled (improves USB drive stability)"
+        fi
+    else
+        log_warn "cmdline.txt not found, skipping USB autosuspend optimization"
+    fi
 }
 
 ################################################################################
@@ -248,11 +262,12 @@ optimize_kernel() {
 
     cat > "$sysctl_conf" << 'EOF'
 # Memory Management
-vm.swappiness=10
+vm.swappiness=1
 vm.dirty_ratio=15
 vm.dirty_background_ratio=5
 vm.vfs_cache_pressure=50
 vm.overcommit_memory=1
+vm.min_free_kbytes=65536
 
 # Network Stack Optimizations
 net.core.somaxconn=1024
@@ -463,15 +478,23 @@ optimize_memory() {
     # 1. Disable Disk-based Swap (Permanent)
     log_info "Configuring swap settings..."
     
-    # Disable dphys-swapfile (Raspberry Pi default)
-    if systemctl list-unit-files | grep -q dphys-swapfile; then
-        if systemctl is-enabled --quiet dphys-swapfile; then
-            systemctl stop dphys-swapfile 2>/dev/null || true
-            systemctl disable dphys-swapfile 2>/dev/null || true
-            log_pass "dphys-swapfile service disabled (permanent)"
-        else
-            log_skip "dphys-swapfile already disabled"
-        fi
+    # Disable and purge dphys-swapfile (Raspberry Pi default)
+    if command_exists dphys-swapfile; then
+        log_info "Removing dphys-swapfile..."
+        dphys-swapfile swapoff 2>/dev/null || true
+        dphys-swapfile uninstall 2>/dev/null || true
+        systemctl stop dphys-swapfile 2>/dev/null || true
+        systemctl disable dphys-swapfile 2>/dev/null || true
+        # Remove the swap file itself if it still exists
+        rm -f /var/swap
+        log_pass "dphys-swapfile service disabled and swap file removed"
+    fi
+
+    # Check for and disable systemd-swap if present
+    if systemctl list-unit-files | grep -q systemd-swap; then
+        systemctl stop systemd-swap 2>/dev/null || true
+        systemctl disable systemd-swap 2>/dev/null || true
+        log_pass "systemd-swap service disabled"
     fi
 
     # Disable runtime disk swap
