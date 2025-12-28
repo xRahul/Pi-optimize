@@ -70,6 +70,16 @@ preflight_checks() {
     
     ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || log_error "Internet required"
     log_pass "Connectivity: OK"
+
+    # Boot Drive Detection
+    local boot_dev=$(findmnt -n -o SOURCE /)
+    local boot_tran=$(lsblk -no TRAN "$(lsblk -no PKNAME "$boot_dev" 2>/dev/null || echo "$boot_dev")" 2>/dev/null | head -n1)
+    
+    if [[ "$boot_tran" == "usb" ]]; then
+        log_pass "Boot Drive: USB Flash/SSD detected"
+    else
+        log_warn "Boot Drive: $boot_tran (Not USB). Ensure you are booting from your flash drive for best performance."
+    fi
 }
 
 ################################################################################
@@ -86,11 +96,14 @@ system_core() {
         "ca-certificates" "curl" "gnupg" "git" "jq" "bc" 
         "usbutils" "util-linux" "watchdog" "e2fsprogs" 
         "smartmontools" "cpufrequtils" "zram-tools" "fail2ban" "ufw"
-        "htop" "vim" "tmux" "net-tools" "lsb-release"
+        "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
+        "busybox-syslogd"
     )
     
     for pkg in "${packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii.*${pkg}"; then
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+            log_skip "$pkg already installed"
+        else
             log_info "Installing $pkg..."
             apt-get install -y "$pkg" || log_warn "Failed: $pkg"
         fi
