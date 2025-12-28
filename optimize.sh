@@ -460,7 +460,36 @@ optimize_docker() {
 optimize_memory() {
     log_section "MEMORY & SWAP"
 
-    # ZRAM setup (Generic via zram-tools if available)
+    # 1. Disable Disk-based Swap (Permanent)
+    log_info "Configuring swap settings..."
+    
+    # Disable dphys-swapfile (Raspberry Pi default)
+    if systemctl list-unit-files | grep -q dphys-swapfile; then
+        if systemctl is-enabled --quiet dphys-swapfile; then
+            systemctl stop dphys-swapfile 2>/dev/null || true
+            systemctl disable dphys-swapfile 2>/dev/null || true
+            log_pass "dphys-swapfile service disabled (permanent)"
+        else
+            log_skip "dphys-swapfile already disabled"
+        fi
+    fi
+
+    # Disable runtime disk swap
+    local other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
+    if [[ -n "$other_swaps" ]]; then
+        for s in $other_swaps; do
+            swapoff "$s" 2>/dev/null || true
+        done
+        log_pass "Active disk swap(s) disabled"
+    fi
+
+    # Disable fstab swap entries
+    if grep -E "^[^#].*\sswap\s" /etc/fstab >/dev/null; then
+        sed -i '/\sswap\s/ s/^/#/' /etc/fstab
+        log_pass "Swap entries in fstab disabled"
+    fi
+
+    # 2. ZRAM Setup (if available)
     if [[ -f /etc/default/zramswap ]]; then
         if grep -q "ALGO=zstd" /etc/default/zramswap && grep -q "PERCENT=60" /etc/default/zramswap; then
             log_skip "ZRAM already configured (zstd, 60%)"
@@ -469,22 +498,6 @@ optimize_memory() {
             sed -i 's/PERCENT=.*/PERCENT=60/' /etc/default/zramswap
             systemctl restart zramswap 2>/dev/null || true
             log_pass "ZRAM tuned: zstd, 60%"
-        fi
-    fi
-
-    # Disable traditional swap if ZRAM is active
-    if [[ -f /sys/block/zram0/disksize ]]; then
-        # Identify non-zram swap devices (ignoring header)
-        local other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
-        
-        if [[ -n "$other_swaps" ]]; then
-            log_info "Disabling disk-based swap..."
-            for s in $other_swaps; do
-                swapoff "$s" 2>/dev/null || true
-            done
-            # Comment out swap in fstab
-            sed -i '/\sswap\s/ s/^/#/' /etc/fstab
-            log_pass "Traditional swap disabled"
         fi
     fi
 }
