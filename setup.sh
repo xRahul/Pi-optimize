@@ -151,14 +151,30 @@ nodejs_tooling() {
 usb_optimization() {
     log_section "USB & OPTIMIZATION"
     
-    # We delegate the heavy lifting to optimize.sh now
+    # Prepare USB mount directory
+    local mount_path="/mnt/usb"
+    if [[ ! -d "$mount_path" ]]; then
+        mkdir -p "$mount_path"
+        log_pass "Mount directory created: $mount_path"
+    else
+        log_skip "Mount directory already exists: $mount_path"
+    fi
+    
+    # Run optimize.sh for system-wide tuning
     if [[ -f "./optimize.sh" ]]; then
         chmod +x ./optimize.sh
         log_info "Running optimize.sh..."
-        ./optimize.sh
+        ./optimize.sh || log_warn "optimize.sh encountered issues but continuing"
         log_pass "Optimizations applied"
     else
-        log_warn "optimize.sh not found in current directory"
+        log_error "optimize.sh not found in current directory"
+    fi
+    
+    # Verify USB mount was configured
+    if grep -q "$mount_path" /etc/fstab; then
+        log_pass "USB mount verified in fstab"
+    else
+        log_warn "USB mount not found in fstab - may need manual configuration"
     fi
 }
 
@@ -174,12 +190,32 @@ main() {
     nodejs_tooling
     usb_optimization
     
+    # Post-setup verification and reload
+    if systemctl daemon-reload 2>/dev/null; then
+        log_pass "Systemd daemon reloaded"
+    fi
+    
+    # Try to mount all filesystems from fstab (non-blocking)
+    mount -a 2>/dev/null || log_warn "Some mounts failed (may be expected)"
+    
     log_section "SETUP COMPLETE"
-    log_success "✓ Raspberry Pi Home Server configured!"
-    log_info "Please REBOOT to apply all changes."
+    echo -e "${GREEN}✓ Raspberry Pi Home Server configured!${NC}"
+    log_info "Applied optimizations:"
+    log_info "  • Hardware thermals & performance tuning"
+    log_info "  • Docker container runtime with USB storage"
+    log_info "  • Node.js development environment"
+    log_info "  • System hardening & security"
+    log_info "  • Automatic USB mounting on boot"
+    log_info "  • Log files: /var/log/rpi-optimize.log"
+    echo ""
+    log_warn "⚠️  REBOOT IS REQUIRED TO APPLY ALL CHANGES"
     
     if confirm_action "Reboot now?"; then
+        log_info "Rebooting in 10 seconds... (Press Ctrl+C to cancel)"
+        sleep 10
         reboot
+    else
+        log_info "Setup complete. Run 'sudo reboot' when ready."
     fi
 }
 

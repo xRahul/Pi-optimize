@@ -190,14 +190,20 @@ optimize_storage() {
 
     # 2. I/O Scheduler (BFQ for USB/SD)
     log_info "Configuring BFQ scheduler..."
-    local devices=$(lsblk -d -o NAME,TRAN | grep -E "usb|sd" | awk '{print $1}' || echo "")
-    for dev in $devices; do
-        if [[ -f "/sys/block/$dev/queue/scheduler" ]]; then
-            if grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
-                echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
+    local devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd" | awk '{print $1}' || echo "")
+    if [[ -z "$devices" ]]; then
+        log_skip "No USB/SD devices found for I/O scheduler optimization"
+    else
+        for dev in $devices; do
+            if [[ -f "/sys/block/$dev/queue/scheduler" ]]; then
+                if grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
+                    echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
+                else
+                    log_skip "BFQ not available for $dev"
+                fi
             fi
-        fi
-    done
+        done
+    fi
 
     # 3. fstrim for SSDs (if applicable)
     if systemctl list-unit-files | grep -q fstrim.timer; then
@@ -221,8 +227,8 @@ optimize_kernel() {
 vm.swappiness=10
 vm.dirty_ratio=15
 vm.dirty_background_ratio=5
-vim.vfs_cache_pressure=50
-vim.overcommit_memory=1
+vm.vfs_cache_pressure=50
+vm.overcommit_memory=1
 
 # Network Stack Optimizations
 net.core.somaxconn=1024
@@ -257,6 +263,78 @@ EOF
 
     sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
     log_pass "Kernel parameters optimized (including BBR & Security)"
+}
+
+################################################################################
+# 5. USB Auto-Mount Configuration
+################################################################################
+
+setup_usb_automount() {
+    log_section "USB AUTO-MOUNT"
+    
+    local mount_path="/mnt/usb"
+    local fstab_file="/etc/fstab"
+    
+    # Create mount directory if it doesn't exist
+    if [[ ! -d "$mount_path" ]]; then
+        mkdir -p "$mount_path"
+        log_pass "Mount directory created: $mount_path"
+    else
+        log_skip "Mount directory already exists: $mount_path"
+    fi
+    
+    # Check if USB device needs to be added to fstab
+    # Look for USB devices
+    local usb_device=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep "usb" | awk '{print $1}' | head -1)
+    
+    if [[ -z "$usb_device" ]]; then
+        log_warn "No USB device detected. Manual fstab configuration may be required."
+        return
+    fi
+    
+    # Get UUID of the USB device
+    local usb_dev_path="/dev/$usb_device"
+    if [[ ! -b "$usb_dev_path" ]]; then
+        log_warn "USB device $usb_dev_path not found"
+        return
+    fi
+    
+    local usb_uuid=$(blkid -s UUID -o value "$usb_dev_path" 2>/dev/null)
+    if [[ -z "$usb_uuid" ]]; then
+        log_warn "Could not determine UUID for $usb_dev_path. Manual configuration required."
+        return
+    fi
+    
+    # Check if already in fstab
+    if grep -q "UUID=$usb_uuid" "$fstab_file"; then
+        log_skip "USB mount already configured in fstab (UUID: $usb_uuid)"
+    else
+        backup_file "$fstab_file"
+        
+        # Detect filesystem type
+        local fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
+        
+        # Add appropriate mount options based on filesystem
+        local mount_opts="defaults,nofail,noatime"
+        if [[ "$fs_type" == "vfat" || "$fs_type" == "exfat" ]]; then
+            mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,umask=002,utf8"
+        fi
+        
+        echo "UUID=$usb_uuid  $mount_path  $fs_type  $mount_opts  0  2" >> "$fstab_file"
+        log_pass "USB mount added to fstab (UUID: $usb_uuid, Type: $fs_type)"
+    fi
+    
+    # Create systemd mount override to ensure Docker waits
+    mkdir -p /etc/systemd/system/docker.service.d
+    if [[ ! -f /etc/systemd/system/docker.service.d/usb-mount.conf ]]; then
+        cat > /etc/systemd/system/docker.service.d/usb-mount.conf << 'EOF'
+[Unit]
+RequiresMountsFor=/mnt/usb
+EOF
+        log_pass "Docker USB mount dependency configured"
+    else
+        log_skip "Docker USB mount dependency already configured"
+    fi
 }
 
 ################################################################################
@@ -306,13 +384,10 @@ optimize_docker() {
     echo "$config_content" > "$docker_config"
     log_pass "Docker daemon.json optimized"
 
-    # Systemd Override
+    # Systemd Override for performance tuning
     mkdir -p /etc/systemd/system/docker.service.d
-    cat > /etc/systemd/system/docker.service.d/override.conf << 'EOF'
-[Unit]
-After=mnt-usb.mount
-RequiresMountsFor=/mnt/usb
-
+    if [[ ! -f /etc/systemd/system/docker.service.d/performance.conf ]]; then
+        cat > /etc/systemd/system/docker.service.d/performance.conf << 'EOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd --log-level=warn
@@ -320,10 +395,13 @@ TasksMax=infinity
 LimitNOFILE=infinity
 LimitNPROC=infinity
 EOF
-    systemctl daemon-reload
-    log_pass "Docker systemd overrides applied"
+        log_pass "Docker performance overrides applied"
+    else
+        log_skip "Docker performance overrides already configured"
+    fi
     
-    systemctl restart docker || log_error "Failed to restart Docker"
+    systemctl daemon-reload
+    systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
 }
 
 ################################################################################
@@ -432,6 +510,7 @@ main() {
     optimize_cpu
     optimize_storage
     optimize_kernel
+    setup_usb_automount
     optimize_docker
     optimize_memory
     optimize_logs
