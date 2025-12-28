@@ -33,6 +33,7 @@ WARNINGS=0
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_pass() { echo -e "${GREEN}[✓]${NC} $1"; ((CHECKS_PASSED++)); }
 log_fail() { echo -e "${RED}[✗]${NC} $1"; ((CHECKS_FAILED++)); }
+log_skip() { echo -e "${YELLOW}[⊘]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[!]${NC} $1"; ((WARNINGS++)); }
 log_section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 log_error() { echo -e "\n${RED}ERROR: $1${NC}"; exit 1; }
