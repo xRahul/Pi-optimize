@@ -44,7 +44,7 @@ service_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
 log_section "SYSTEM VITAL SIGNS"
 
 # OS & Model
-MODEL=$(cat /proc/device-tree/model 2>/dev/null || echo "Unknown Pi")
+MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "Unknown Pi")
 source /etc/os-release 2>/dev/null
 log_info "Hardware: $MODEL"
 log_info "OS: $PRETTY_NAME ($(uname -m))"
@@ -97,7 +97,7 @@ fi
 log_section "STORAGE HEALTH"
 
 # Disk Usage
-df -h / | awk 'NR==2 {usage=$5; gsub(/%/,"",usage); if(usage<85) print "PASS", $4; else print "FAIL", $4}' | while read status free;
+df -h --output=pcent,avail / | tail -n 1 | awk '{usage=$1; gsub(/%/,"",usage); if(usage<85) print "PASS\t" $2; else print "FAIL\t" $2}' | while read status free;
     do
     [[ "$status" == "PASS" ]] && log_pass "Root space: $free free" || log_fail "Root space low: $free free"
 done
@@ -171,7 +171,7 @@ if command_exists nslookup;
 fi
 
 # Interfaces
-ip -4 addr show | grep -v "127.0.0.1" | grep "inet " | awk '{print $NF, $2}' | while read iface addr;
+ip -4 addr show | grep -v "127.0.0.1" | grep "inet " | awk '{print $NF "\t" $2}' | while read iface addr;
     do
     log_info "Interface $iface: $addr"
 done
