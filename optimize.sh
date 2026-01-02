@@ -495,6 +495,53 @@ optimize_docker() {
 }
 
 ################################################################################
+# 5a. Tailscale Fix
+################################################################################
+
+fix_tailscale_race() {
+    log_section "TAILSCALE CONNECTIVITY FIX"
+
+    if ! command_exists docker; then
+        log_skip "Docker not installed"
+        return
+    fi
+
+    # Check if tailscale container exists (running or stopped)
+    if ! docker ps -a --format '{{.Names}}' | grep -q "^tailscale$"; then
+        log_skip "Tailscale container not found. Skipping fix."
+        return
+    fi
+
+    local service_file="/etc/systemd/system/tailscale-fix.service"
+    
+    # We create a service that waits for valid internet connection then restarts tailscale
+    cat > "$service_file" << 'EOF'
+[Unit]
+Description=Fix Tailscale Connectivity on Boot
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Wait for internet connectivity (up to 60s)
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break; sleep 2; done'
+ExecStart=/usr/bin/docker restart tailscale
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    if systemctl enable tailscale-fix.service 2>/dev/null; then
+        log_pass "Tailscale boot fix enabled"
+    else
+        log_warn "Failed to enable Tailscale boot fix"
+    fi
+}
+
+################################################################################
 # 6. Memory & Swap (ZRAM)
 ################################################################################
 
@@ -642,6 +689,7 @@ main() {
     optimize_kernel
     setup_usb_automount
     optimize_docker
+    fix_tailscale_race
     optimize_memory
     optimize_logs
     system_maintenance

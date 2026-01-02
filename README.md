@@ -77,6 +77,7 @@ sudo ./diag.sh
 ### ⚡ `optimize.sh` (The Tuner)
 *   **Swap**: Removes `dphys-swapfile` and sets `vm.swappiness=1` for minimal swapping.
 *   **Kernel**: Hardens `sysctl` settings, enables BBR, and tunes memory for USB I/O.
+*   **Network Repair**: Auto-detects Tailscale and installs a boot-time connectivity fix.
 *   **Maintenance**: Prunes Docker, clears documentation, and configures the firewall.
 
 ### 🩺 `diag.sh` (The Auditor)
