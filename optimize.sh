@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Raspberry Pi Home Server Optimization - ULTIMATE EDITION v4.1.0
+# Raspberry Pi Home Server Optimization - ULTIMATE EDITION v4.2.0
 # Target: Debian Trixie/Bookworm (aarch64)
 # Optimizes for: Performance, Stability, Flash Longevity, Security
 # License: MIT (Copyright 2025 Rahul)

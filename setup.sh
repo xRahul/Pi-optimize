@@ -386,7 +386,7 @@ main() {
     
     log_section "SETUP COMPLETE"
     echo -e "${GREEN}✓ Raspberry Pi Home Server configured!${NC}"
-    log_info "Applied optimizations:"
+    log_info "Applied Optimizations:"
     log_info "  • Hardware thermals & performance tuning"
     log_info "  • Docker container runtime with USB storage"
     log_info "  • Node.js development environment"
