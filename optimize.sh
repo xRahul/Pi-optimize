@@ -726,6 +726,20 @@ EOF
 # 7b. Ollama Service
 ################################################################################
 
+# Helper for prompts in optimize.sh
+prompt_update() {
+    local prompt="$1"
+    # Non-interactive check: if not running in a terminal, assume No
+    if [[ ! -t 0 ]]; then return 1; fi 
+    
+    # Read with timeout (15s) to prevent hanging automated runs
+    read -t 15 -p "$(echo -e ${CYAN}$prompt${NC} [y/N]: )" -r response || return 1
+    case "$response" in
+        [yY]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 optimize_ollama_service() {
     log_section "OLLAMA SERVICE"
     if command_exists ollama; then
@@ -733,6 +747,32 @@ optimize_ollama_service() {
         if ! systemctl is-enabled --quiet ollama; then
             systemctl enable ollama
             log_pass "Ollama service enabled"
+        fi
+
+        # --- Update Check ---
+        log_info "Checking for Ollama updates..."
+        local current_ver=$(ollama --version 2>/dev/null | awk '{print $3}')
+        # Use a short timeout for the network call
+        local latest_ver=$(curl -s --max-time 3 https://api.github.com/repos/ollama/ollama/releases/latest | jq -r .tag_name 2>/dev/null | sed 's/^v//' || echo "")
+
+        if [[ -n "$latest_ver" ]] && [[ -n "$current_ver" ]]; then
+            if [[ "$current_ver" != "$latest_ver" ]]; then
+                echo -e "${YELLOW}Update available: $current_ver -> $latest_ver${NC}"
+                if prompt_update "Do you want to update Ollama?"; then
+                    log_info "Updating Ollama..."
+                    if curl -fsSL https://ollama.com/install.sh | sh; then
+                        log_pass "Ollama updated to $latest_ver"
+                    else
+                        log_warn "Ollama update failed"
+                    fi
+                else
+                    log_skip "Update skipped by user"
+                fi
+            else
+                log_pass "Ollama is up to date ($current_ver)"
+            fi
+        else
+            log_warn "Could not check for Ollama updates (Network/API issue)"
         fi
 
         # Apply boot-order and permission fixes

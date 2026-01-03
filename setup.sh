@@ -204,21 +204,40 @@ install_ollama() {
     echo -e "${YELLOW}Ollama allows running Large Language Models (LLMs) locally on your Pi 5.${NC}"
     echo -e "On Raspberry Pi 5, it utilizes the CPU (Cortex-A76) for inference."
 
-    if confirm_action "Install Ollama Native (Warning: High CPU/RAM usage when active)?"; then
-        log_info "Downloading and installing Ollama..."
-        if curl -fsSL https://ollama.com/install.sh | sh; then
-            log_pass "Ollama installed successfully"
-            systemctl enable ollama
-            
-            # --- Optimizations ---
-            log_info "Applying Ollama optimizations..."
-            local override_dir="/etc/systemd/system/ollama.service.d"
-            local override_file="${override_dir}/override.conf"
-            local models_dir="/usr/share/ollama/.ollama/models" # Default
-            local optimize_config=false
+    local proceed_config=false
 
-            # 1. Storage Optimization (Critical for SD cards)
-            if mountpoint -q /mnt/usb; then
+    if command_exists ollama; then
+        log_info "Ollama is already installed: $(ollama --version)"
+        proceed_config=true
+    else
+        if confirm_action "Install Ollama Native (Warning: High CPU/RAM usage when active)?"; then
+            log_info "Downloading and installing Ollama..."
+            if curl -fsSL https://ollama.com/install.sh | sh; then
+                log_pass "Ollama installed successfully"
+                systemctl enable ollama
+                proceed_config=true
+            else
+                log_warn "Ollama installation failed. Continuing with setup..."
+            fi
+        else
+            log_skip "Skipping Ollama installation"
+        fi
+    fi
+
+    # --- Optimizations & Configuration ---
+    if [ "$proceed_config" = true ]; then
+        log_info "Checking Ollama configuration..."
+        local override_dir="/etc/systemd/system/ollama.service.d"
+        local override_file="${override_dir}/override.conf"
+        local models_dir="/usr/share/ollama/.ollama/models" # Default
+        local optimize_config=false
+
+        # 1. Storage Optimization (Critical for SD cards)
+        if mountpoint -q /mnt/usb; then
+            # If already configured in override, respect it, otherwise ask
+            if grep -q "OLLAMA_MODELS=/mnt/usb" "$override_file" 2>/dev/null; then
+                log_skip "Ollama storage already configured for USB"
+            else
                 echo -e "${GREEN}USB drive detected at /mnt/usb.${NC}"
                 if confirm_action "Store Ollama models on USB drive (Highly Recommended)?"; then
                     models_dir="/mnt/usb/ollama"
@@ -229,22 +248,28 @@ install_ollama() {
                     log_pass "Model storage configured: $models_dir"
                     optimize_config=true
                 fi
-            else
-                log_warn "USB not mounted. Models will be stored on the boot drive (check available space!)."
             fi
+        else
+            log_warn "USB not mounted. Models will be stored on the boot drive (check available space!)."
+        fi
 
-            # 2. Network Optimization
-            local bind_addr="127.0.0.1"
+        # 2. Network Optimization
+        local bind_addr="127.0.0.1"
+        if grep -q "OLLAMA_HOST=0.0.0.0" "$override_file" 2>/dev/null; then
+             log_skip "Ollama already exposed to network (0.0.0.0)"
+             bind_addr="0.0.0.0"
+        else
             if confirm_action "Expose Ollama to local network (0.0.0.0) for external access/Docker UI?"; then
                 bind_addr="0.0.0.0"
                 log_pass "Bind address set to 0.0.0.0"
                 optimize_config=true
             fi
+        fi
 
-            # Apply Systemd Overrides if needed
-            if [ "$optimize_config" = true ] || [ "$models_dir" != "/usr/share/ollama/.ollama/models" ]; then
-                mkdir -p "$override_dir"
-                cat > "$override_file" <<EOF
+        # Apply Systemd Overrides if needed
+        if [ "$optimize_config" = true ]; then
+            mkdir -p "$override_dir"
+            cat > "$override_file" <<EOF
 [Unit]
 After=network-online.target
 RequiresMountsFor=${models_dir}
@@ -254,22 +279,17 @@ Environment="OLLAMA_MODELS=${models_dir}"
 Environment="OLLAMA_HOST=${bind_addr}"
 Environment="OLLAMA_KEEP_ALIVE=5m"
 EOF
-                log_pass "Systemd override configured"
-                systemctl daemon-reload
-                systemctl restart ollama
-            fi
-            
-            # Verification
-            if systemctl is-active --quiet ollama; then
-                log_pass "Ollama service active and optimized"
-            else
-                log_warn "Ollama service failed to restart. Check 'systemctl status ollama'"
-            fi
-        else
-            log_warn "Ollama installation failed. Continuing with setup..."
+            log_pass "Systemd override configured"
+            systemctl daemon-reload
+            systemctl restart ollama
         fi
-    else
-        log_skip "Skipping Ollama installation"
+        
+        # Verification
+        if systemctl is-active --quiet ollama; then
+            log_pass "Ollama service active"
+        else
+            log_warn "Ollama service failed to restart. Check 'systemctl status ollama'"
+        fi
     fi
 }
 
