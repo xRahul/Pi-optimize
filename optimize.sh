@@ -12,7 +12,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.2.0"
+SCRIPT_VERSION="4.2.1"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
@@ -830,6 +830,8 @@ system_maintenance() {
         ufw allow 443/tcp >/dev/null
         # Allow Docker traffic
         ufw allow in on docker0 >/dev/null
+        # Fix for n8n <-> Ollama connection timeout (Allow wg-easy subnet to Ollama)
+        ufw allow from 10.8.1.0/24 to any port 11434 proto tcp >/dev/null
         echo "y" | ufw enable >/dev/null
         log_pass "Firewall (UFW) configured and enabled"
     fi

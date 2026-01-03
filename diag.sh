@@ -12,7 +12,7 @@ set -u
 # We don't use 'set -e' to allow the script to continue after a failed check
 
 # --- Constants ---
-SCRIPT_VERSION="4.2.0"
+SCRIPT_VERSION="4.2.1"
 LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
@@ -376,8 +376,24 @@ check_network() {
         local ufw_status=$(ufw status | grep "Status" | awk '{print $2}')
         if [ "$ufw_status" == "active" ]; then
             report_pass "Firewall (UFW): Active"
+            # Check for specific Ollama fix
+            if ufw status | grep -q "11434/tcp.*ALLOW.*10.8.1.0/24"; then
+                report_pass "Firewall Rule: Ollama (10.8.1.x) -> Port 11434 ALLOWED"
+            else
+                report_warn "Firewall Rule: Ollama (10.8.1.x) -> Port 11434 MISSING" "Run optimize.sh to apply fix."
+            fi
         else
             report_warn "Firewall (UFW): Inactive" "Enable UFW for security."
+        fi
+    fi
+
+    # Connectivity Check: n8n -> Ollama
+    if command_exists docker && docker ps --format '{{.Names}}' | grep -q "^n8n$"; then
+        report_info "Testing connectivity: n8n -> Ollama (host.docker.internal)..."
+        if docker exec n8n timeout 5 wget -O- http://host.docker.internal:11434/api/tags >/dev/null 2>&1; then
+            report_pass "Connectivity: n8n can reach Ollama"
+        else
+            report_fail "Connectivity: n8n CANNOT reach Ollama" "Check firewall rules or Ollama bind address."
         fi
     fi
 

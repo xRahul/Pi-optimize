@@ -11,7 +11,7 @@ set -o pipefail
 IFS=$'\n\t'
 
 # --- Constants ---
-SCRIPT_VERSION="4.2.0"
+SCRIPT_VERSION="4.2.1"
 USB_MOUNT_PATH="/mnt/usb"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
