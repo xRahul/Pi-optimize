@@ -259,6 +259,21 @@ check_storage() {
         report_fail "Kernel Logs: Disk errors detected!" "Check 'dmesg' output immediately."
         echo -e "${RED}$io_errors${NC}"
     fi
+
+    # SMART Health Check
+    if command_exists smartctl; then
+        local disk_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null | sed 's/[0-9]*$//')
+        if [ -b "$disk_dev" ]; then
+            local smart_status=$(smartctl -H "$disk_dev" 2>/dev/null | grep -i "test result" | cut -d: -f2 | xargs)
+            if [[ "$smart_status" == "PASSED" ]]; then
+                report_pass "SMART Health: PASSED ($disk_dev)"
+            elif [[ -z "$smart_status" ]]; then
+                 report_info "SMART Health: Unavailable/Unsupported for $disk_dev"
+            else
+                report_fail "SMART Health: $smart_status ($disk_dev)" "Drive may be failing!"
+            fi
+        fi
+    fi
 }
 
 ################################################################################
@@ -322,6 +337,15 @@ check_docker() {
     else
         report_pass "Containers: All healthy"
     fi
+
+    # Docker Compose Auto-Restart Service Check
+    if [ -f "/etc/systemd/system/docker-compose-restart.service" ]; then
+        if systemctl is-enabled --quiet docker-compose-restart.service 2>/dev/null; then
+             report_pass "Compose Auto-Restart: Enabled"
+        else
+             report_warn "Compose Auto-Restart: Disabled" "Service exists but is not enabled."
+        fi
+    fi
 }
 
 ################################################################################
@@ -370,6 +394,23 @@ check_network() {
             report_pass "Fail2Ban: Running"
         else
             report_warn "Fail2Ban: Inactive" "Recommended for SSH security."
+        fi
+    fi
+
+    # Ollama (if installed)
+    if command_exists ollama; then
+        if systemctl is-active --quiet ollama; then
+            report_pass "Ollama Service: Active"
+            if command_exists curl; then
+                 # Ollama root endpoint returns "Ollama is running"
+                 if curl -s --max-time 2 http://127.0.0.1:11434 >/dev/null; then
+                     report_pass "Ollama API: Responding (Port 11434)"
+                 else
+                     report_warn "Ollama API: Not responding" "Check logs: journalctl -u ollama"
+                 fi
+            fi
+        else
+            report_warn "Ollama Service: Inactive" "System has Ollama installed but service is down."
         fi
     fi
 }

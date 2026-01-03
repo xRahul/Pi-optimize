@@ -11,7 +11,7 @@ set -o pipefail
 IFS=$'\n\t'
 
 # --- Constants ---
-SCRIPT_VERSION="4.0.0"
+SCRIPT_VERSION="4.2.0"
 USB_MOUNT_PATH="/mnt/usb"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -195,7 +195,79 @@ nodejs_tooling() {
 }
 
 ################################################################################
-# 5. USB & Optimization
+# 5. Ollama (Optional AI)
+################################################################################
+
+install_ollama() {
+    log_section "OLLAMA AI (OPTIONAL)"
+
+    echo -e "${YELLOW}Ollama allows running Large Language Models (LLMs) locally on your Pi 5.${NC}"
+    echo -e "On Raspberry Pi 5, it utilizes the CPU (Cortex-A76) for inference."
+
+    if confirm_action "Install Ollama Native (Warning: High CPU/RAM usage when active)?"; then
+        log_info "Downloading and installing Ollama..."
+        if curl -fsSL https://ollama.com/install.sh | sh; then
+            log_pass "Ollama installed successfully"
+            
+            # --- Optimizations ---
+            log_info "Applying Ollama optimizations..."
+            local override_dir="/etc/systemd/system/ollama.service.d"
+            local override_file="${override_dir}/override.conf"
+            local models_dir="/usr/share/ollama/.ollama/models" # Default
+            local optimize_config=false
+
+            # 1. Storage Optimization (Critical for SD cards)
+            if mountpoint -q /mnt/usb; then
+                echo -e "${GREEN}USB drive detected at /mnt/usb.${NC}"
+                if confirm_action "Store Ollama models on USB drive (Highly Recommended)?"; then
+                    models_dir="/mnt/usb/ollama"
+                    mkdir -p "$models_dir"
+                    chown ollama:ollama "$models_dir" 2>/dev/null || true
+                    log_pass "Model storage configured: $models_dir"
+                    optimize_config=true
+                fi
+            else
+                log_warn "USB not mounted. Models will be stored on the boot drive (check available space!)."
+            fi
+
+            # 2. Network Optimization
+            local bind_addr="127.0.0.1"
+            if confirm_action "Expose Ollama to local network (0.0.0.0) for external access/Docker UI?"; then
+                bind_addr="0.0.0.0"
+                log_pass "Bind address set to 0.0.0.0"
+                optimize_config=true
+            fi
+
+            # Apply Systemd Overrides if needed
+            if [ "$optimize_config" = true ] || [ "$models_dir" != "/usr/share/ollama/.ollama/models" ]; then
+                mkdir -p "$override_dir"
+                cat > "$override_file" <<EOF
+[Service]
+Environment="OLLAMA_MODELS=${models_dir}"
+Environment="OLLAMA_HOST=${bind_addr}"
+Environment="OLLAMA_KEEP_ALIVE=5m"
+EOF
+                log_pass "Systemd override configured"
+                systemctl daemon-reload
+                systemctl restart ollama
+            fi
+            
+            # Verification
+            if systemctl is-active --quiet ollama; then
+                log_pass "Ollama service active and optimized"
+            else
+                log_warn "Ollama service failed to restart. Check 'systemctl status ollama'"
+            fi
+        else
+            log_warn "Ollama installation failed. Continuing with setup..."
+        fi
+    else
+        log_skip "Skipping Ollama installation"
+    fi
+}
+
+################################################################################
+# 6. USB & Optimization
 ################################################################################
 
 usb_optimization() {
@@ -275,6 +347,7 @@ main() {
     docker_suite
     nodejs_tooling
     usb_optimization
+    install_ollama
     
     # Post-setup verification and reload
     if systemctl daemon-reload 2>/dev/null; then

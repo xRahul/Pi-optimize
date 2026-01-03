@@ -1,4 +1,4 @@
-# 🥧 Raspberry Pi Home Server Optimization Suite (v4.1.0)
+# 🥧 Raspberry Pi Home Server Optimization Suite (v4.2.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Pi 5](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red.svg)]()

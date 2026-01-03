@@ -12,7 +12,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.1.0"
+SCRIPT_VERSION="4.2.0"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
@@ -495,6 +495,85 @@ optimize_docker() {
 }
 
 ################################################################################
+# 5b. Docker Compose Auto-Restart
+################################################################################
+
+setup_docker_compose_restart() {
+    log_section "DOCKER COMPOSE AUTO-RESTART"
+
+    if ! command_exists docker; then
+        log_skip "Docker not installed"
+        return
+    fi
+
+    # Determine real user and home
+    local target_user="${SUDO_USER:-$USER}"
+    # If root, try to find 'rahul' or assume root
+    if [[ "$target_user" == "root" ]] && [[ -d "/home/rahul" ]]; then
+        target_user="rahul"
+    fi
+    
+    local target_home
+    if command_exists getent; then
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    else
+        target_home="/home/$target_user"
+    fi
+    
+    local docker_dir="${target_home}/docker"
+
+    if [[ ! -d "$docker_dir" ]]; then
+        log_skip "Directory $docker_dir not found. Skipping auto-restart setup."
+        return
+    fi
+
+    local service_file="/etc/systemd/system/docker-compose-restart.service"
+    
+    if [[ -f "$service_file" ]]; then
+        log_skip "Service docker-compose-restart already exists."
+        return
+    fi
+
+    # Interactive Prompt
+    echo -e "${YELLOW}Do you want to enable automatic 'docker compose down && docker compose up -d' in $docker_dir on boot? [y/N]${NC}"
+    local choice
+    # Use || true to prevent exit on read failure (e.g., EOF)
+    read -r -p "Select (default No): " choice || choice="N"
+    choice=${choice:-N}
+
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+        cat > "$service_file" << EOF
+[Unit]
+Description=Restart Docker Compose services in $docker_dir on boot
+Requires=docker.service
+After=docker.service network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=$docker_dir
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose up -d
+RemainAfterExit=yes
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        if systemctl enable docker-compose-restart.service 2>/dev/null; then
+             log_pass "Docker compose auto-restart enabled for $docker_dir"
+        else
+             log_warn "Failed to enable docker-compose-restart service"
+        fi
+    else
+        log_skip "User declined docker compose auto-restart"
+    fi
+}
+
+################################################################################
 # 5a. Tailscale Fix
 ################################################################################
 
@@ -690,6 +769,7 @@ main() {
     setup_usb_automount
     optimize_docker
     fix_tailscale_race
+    setup_docker_compose_restart
     optimize_memory
     optimize_logs
     system_maintenance
