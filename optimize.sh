@@ -715,6 +715,24 @@ EOF
 }
 
 ################################################################################
+# 7b. Ollama Service
+################################################################################
+
+optimize_ollama_service() {
+    log_section "OLLAMA SERVICE"
+    if command_exists ollama; then
+        if ! systemctl is-enabled --quiet ollama; then
+            systemctl enable ollama
+            log_pass "Ollama service enabled"
+        else
+            log_skip "Ollama service already enabled"
+        fi
+    else
+        log_skip "Ollama not installed"
+    fi
+}
+
+################################################################################
 # 8. Maintenance & Security
 ################################################################################
 
@@ -772,6 +790,7 @@ main() {
     setup_docker_compose_restart
     optimize_memory
     optimize_logs
+    optimize_ollama_service
     system_maintenance
     
     # Summary

@@ -399,6 +399,12 @@ check_network() {
 
     # Ollama (if installed)
     if command_exists ollama; then
+        if systemctl is-enabled --quiet ollama; then
+             report_pass "Ollama Auto-Start: Enabled"
+        else
+             report_warn "Ollama Auto-Start: Disabled" "sudo systemctl enable ollama"
+        fi
+
         if systemctl is-active --quiet ollama; then
             report_pass "Ollama Service: Active"
             if command_exists curl; then

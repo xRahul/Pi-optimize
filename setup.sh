@@ -208,6 +208,7 @@ install_ollama() {
         log_info "Downloading and installing Ollama..."
         if curl -fsSL https://ollama.com/install.sh | sh; then
             log_pass "Ollama installed successfully"
+            systemctl enable ollama
             
             # --- Optimizations ---
             log_info "Applying Ollama optimizations..."
