@@ -71,6 +71,7 @@ sudo ./diag.sh
 ### 🛠 `setup.sh` (The Provisioner)
 *   **Smart Install**: Checks for existing packages to avoid redundant operations.
 *   **USB Detect**: Warns if not booting from USB for optimal performance.
+*   **Ollama AI**: (Optional) Installs and optimizes Ollama for local LLM inference on Pi 5.
 *   **Dependencies**: Installs `fail2ban`, `ufw`, `rng-tools5`, `busybox-syslogd`, and more.
 *   **Integration**: Automatically invokes `optimize.sh`.
 
@@ -89,7 +90,7 @@ sudo ./diag.sh
 ## 🔍 Troubleshooting
 
 ### Docker is not using the USB drive?
-Ensure your USB drive is formatted as **ext4**. `setup.sh` will offer to format it for you. FAT32/exFAT are not supported for Docker storage due to missing Unix permission support.
+Ensure your USB drive is formatted as **ext4** or **btrfs**. FAT32/exFAT are not recommended for Docker storage due to permission issues, though the scripts attempt to mitigate this.
 
 ### How to check logs?
 Optimization logs are stored at `/var/log/rpi-optimize.log`.

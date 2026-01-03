@@ -79,6 +79,14 @@ acquire_lock() {
     echo $$ > "$LOCK_FILE"
 }
 
+ensure_dependencies() {
+    if ! command_exists jq; then
+        log_info "Installing jq for JSON processing..."
+        apt-get update >/dev/null 2>&1
+        apt-get install -y jq >/dev/null 2>&1 || log_warn "Failed to install jq. Some optimizations may be skipped."
+    fi
+}
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -221,7 +229,7 @@ optimize_storage() {
     backup_file /etc/fstab
 
     # 1. Root noatime optimization
-    if grep -E "^[^#].*\s/\s.*\bnoatime\b" /etc/fstab >/dev/null; then
+    if grep -E "^[^#].*\s/\s" /etc/fstab | grep -q "noatime"; then
         log_skip "Root filesystem already has noatime"
     else
         log_info "Adding noatime to root filesystem..."
@@ -602,8 +610,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Wait for internet connectivity (up to 60s)
-ExecStartPre=/bin/bash -c 'for i in {1..30}; do ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && break; sleep 2; done'
+# Wait for internet connectivity (check default gateway)
+ExecStartPre=/bin/bash -c 'gw=$(ip route | grep default | cut -d" " -f3 | head -n1); for i in {1..30}; do ping -c1 -W2 "$gw" >/dev/null 2>&1 && break; sleep 2; done'
 ExecStart=/usr/bin/docker restart tailscale
 RemainAfterExit=yes
 TimeoutStartSec=300
@@ -721,11 +729,42 @@ EOF
 optimize_ollama_service() {
     log_section "OLLAMA SERVICE"
     if command_exists ollama; then
+        # Ensure enabled
         if ! systemctl is-enabled --quiet ollama; then
             systemctl enable ollama
             log_pass "Ollama service enabled"
-        else
-            log_skip "Ollama service already enabled"
+        fi
+
+        # Apply boot-order and permission fixes
+        local override_dir="/etc/systemd/system/ollama.service.d"
+        local override_file="${override_dir}/override.conf"
+        
+        # Check if we are using USB storage
+        if [ -f "$override_file" ] && grep -q "/mnt/usb" "$override_file"; then
+            local models_dir=$(grep "OLLAMA_MODELS" "$override_file" | cut -d'=' -f2 | tr -d '"')
+            
+            if ! grep -q "RequiresMountsFor" "$override_file"; then
+                log_info "Applying boot-order fix to Ollama..."
+                # Extract existing Environment vars
+                local envs=$(grep "Environment=" "$override_file")
+                
+                cat > "$override_file" <<EOF
+[Unit]
+After=network-online.target
+RequiresMountsFor=${models_dir}
+
+[Service]
+${envs}
+EOF
+                systemctl daemon-reload
+                log_pass "Ollama boot-order fix applied"
+            fi
+            
+            # Ensure permissions
+            if ! groups ollama | grep -q "\brahul\b"; then
+                usermod -aG rahul ollama
+                log_pass "Ollama user added to rahul group for USB access"
+            fi
         fi
     else
         log_skip "Ollama not installed"
@@ -767,6 +806,7 @@ system_maintenance() {
 main() {
     require_root
     acquire_lock
+    ensure_dependencies
     
     echo -e "${MAGENTA}"
     echo "██████╗ ██████╗ ██╗    ██████╗ ██████╗ ████████╗██╗███╗   ███╗██╗███████╗███████╗"

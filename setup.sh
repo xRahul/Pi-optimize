@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Raspberry Pi Home Server Setup - PRO EDITION
+# Raspberry Pi Home Server Setup - ULTIMATE EDITION
 # Target: Raspberry Pi OS Debian Trixie (aarch64)
 # Features: Docker, Node.js, USB Mounting, Hardening, Optimizations
 # License: MIT (Copyright 2025 Rahul)
@@ -224,6 +224,8 @@ install_ollama() {
                     models_dir="/mnt/usb/ollama"
                     mkdir -p "$models_dir"
                     chown ollama:ollama "$models_dir" 2>/dev/null || true
+                    # Add ollama to rahul group to handle vfat/exfat mount permissions
+                    usermod -aG rahul ollama 2>/dev/null || true
                     log_pass "Model storage configured: $models_dir"
                     optimize_config=true
                 fi
@@ -243,6 +245,10 @@ install_ollama() {
             if [ "$optimize_config" = true ] || [ "$models_dir" != "/usr/share/ollama/.ollama/models" ]; then
                 mkdir -p "$override_dir"
                 cat > "$override_file" <<EOF
+[Unit]
+After=network-online.target
+RequiresMountsFor=${models_dir}
+
 [Service]
 Environment="OLLAMA_MODELS=${models_dir}"
 Environment="OLLAMA_HOST=${bind_addr}"

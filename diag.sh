@@ -300,7 +300,7 @@ check_docker() {
     report_info "Data Root: $data_root"
     
     # Check backing device transport
-    local backing_dev=$(findmnt -n -o SOURCE --target "$data_root")
+    local backing_dev=$(findmnt -n -o SOURCE --target "$data_root" 2>/dev/null)
     local parent_dev=$(lsblk -nd -o PKNAME -p "$backing_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$backing_dev"
     local transport=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
@@ -435,6 +435,13 @@ main() {
     check_network
 
     log_section "DIAGNOSTIC SUMMARY"
+    local total_checks=$((CHECKS_PASSED + WARNINGS + ERRORS))
+    local score=0
+    if [ $total_checks -gt 0 ]; then
+        score=$(( (CHECKS_PASSED * 100) / total_checks ))
+    fi
+
+    echo -e "Health Score:  ${CYAN}${score}%${NC}"
     echo -e "Checks Passed: ${GREEN}$CHECKS_PASSED${NC}"
     echo -e "Warnings:      ${YELLOW}$WARNINGS${NC}"
     echo -e "Errors:        ${RED}$ERRORS${NC}"
