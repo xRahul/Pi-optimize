@@ -781,12 +781,13 @@ optimize_ollama_service() {
         
         # Check if we are using USB storage
         if [ -f "$override_file" ] && grep -q "/mnt/usb" "$override_file"; then
-            local models_dir=$(grep "OLLAMA_MODELS" "$override_file" | cut -d'=' -f2 | tr -d '"')
+            local models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "")
+            [ -z "$models_dir" ] && models_dir="/mnt/usb/ollama"
             
-            if ! grep -q "RequiresMountsFor" "$override_file"; then
-                log_info "Applying boot-order fix to Ollama..."
-                # Extract existing Environment vars
-                local envs=$(grep "Environment=" "$override_file")
+            if ! grep -q "RequiresMountsFor" "$override_file" || ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file"; then
+                log_info "Applying optimizations & boot-order fix to Ollama..."
+                # Extract existing Environment vars, filtering out ones we are about to add/enforce
+                local envs=$(grep "Environment=" "$override_file" | grep -vE "OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS")
                 
                 cat > "$override_file" <<EOF
 [Unit]
@@ -795,9 +796,13 @@ RequiresMountsFor=${models_dir}
 
 [Service]
 ${envs}
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
 EOF
                 systemctl daemon-reload
-                log_pass "Ollama boot-order fix applied"
+                log_pass "Ollama optimizations & boot-order fix applied"
             fi
             
             # Ensure permissions

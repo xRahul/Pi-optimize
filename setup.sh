@@ -230,40 +230,47 @@ install_ollama() {
         local override_dir="/etc/systemd/system/ollama.service.d"
         local override_file="${override_dir}/override.conf"
         local models_dir="/usr/share/ollama/.ollama/models" # Default
+        local bind_addr="127.0.0.1"
         local optimize_config=false
+
+        # Extract existing values if they exist
+        if [ -f "$override_file" ]; then
+            models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "$models_dir")
+            bind_addr=$(grep "OLLAMA_HOST=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "$bind_addr")
+        fi
 
         # 1. Storage Optimization (Critical for SD cards)
         if mountpoint -q /mnt/usb; then
-            # If already configured in override, respect it, otherwise ask
-            if grep -q "OLLAMA_MODELS=/mnt/usb" "$override_file" 2>/dev/null; then
-                log_skip "Ollama storage already configured for USB"
+            if [[ "$models_dir" == "/mnt/usb"* ]]; then
+                log_skip "Ollama storage already configured for USB ($models_dir)"
             else
                 echo -e "${GREEN}USB drive detected at /mnt/usb.${NC}"
                 if confirm_action "Store Ollama models on USB drive (Highly Recommended)?"; then
                     models_dir="/mnt/usb/ollama"
                     mkdir -p "$models_dir"
                     chown ollama:ollama "$models_dir" 2>/dev/null || true
-                    # Add ollama to rahul group to handle vfat/exfat mount permissions
                     usermod -aG rahul ollama 2>/dev/null || true
                     log_pass "Model storage configured: $models_dir"
                     optimize_config=true
                 fi
             fi
-        else
-            log_warn "USB not mounted. Models will be stored on the boot drive (check available space!)."
         fi
 
         # 2. Network Optimization
-        local bind_addr="127.0.0.1"
-        if grep -q "OLLAMA_HOST=0.0.0.0" "$override_file" 2>/dev/null; then
+        if [[ "$bind_addr" == "0.0.0.0" ]]; then
              log_skip "Ollama already exposed to network (0.0.0.0)"
-             bind_addr="0.0.0.0"
         else
             if confirm_action "Expose Ollama to local network (0.0.0.0) for external access/Docker UI?"; then
                 bind_addr="0.0.0.0"
                 log_pass "Bind address set to 0.0.0.0"
                 optimize_config=true
             fi
+        fi
+
+        # 3. Performance Optimizations (Idempotency check)
+        if ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file" 2>/dev/null; then
+            log_info "New performance optimizations pending..."
+            optimize_config=true
         fi
 
         # Apply Systemd Overrides if needed
@@ -278,6 +285,10 @@ RequiresMountsFor=${models_dir}
 Environment="OLLAMA_MODELS=${models_dir}"
 Environment="OLLAMA_HOST=${bind_addr}"
 Environment="OLLAMA_KEEP_ALIVE=5m"
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
 EOF
             log_pass "Systemd override configured"
             systemctl daemon-reload
