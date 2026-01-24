@@ -14,7 +14,6 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/utils.sh
 if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
-    # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/lib/utils.sh"
 else
     echo "Error: lib/utils.sh not found."
@@ -27,14 +26,6 @@ SCRIPT_VERSION="4.2.1"
 USB_MOUNT_PATH="/mnt/usb"
 # CONFIG_FILE="/boot/firmware/config.txt" # Unused in setup.sh directly, used in optimize.sh
 # BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S) # Unused in setup.sh
-
-# Counters (Globals used by utils.sh)
-# shellcheck disable=SC2034
-CHECKS_PASSED=0
-# shellcheck disable=SC2034
-CHECKS_FAILED=0
-# shellcheck disable=SC2034
-WARNINGS=0
 
 # --- Helper Functions ---
 

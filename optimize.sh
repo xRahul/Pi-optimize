@@ -15,7 +15,6 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/utils.sh
 if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
-    # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/lib/utils.sh"
 else
     echo "Error: lib/utils.sh not found."
@@ -25,19 +24,14 @@ fi
 # --- Constants & Environment ---
 SCRIPT_VERSION="4.2.1"
 CONFIG_FILE="/boot/firmware/config.txt"
-# shellcheck disable=SC2034
-BACKUP_DIR="/var/backups/rpi-optimize"
+export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
 LOCK_FILE="/run/rpi-optimize.lock"
 
 # Counters (Globals used by utils.sh)
-# shellcheck disable=SC2034
 OPTIMIZATIONS_APPLIED=0
-# shellcheck disable=SC2034
 OPTIMIZATIONS_SKIPPED=0
-# shellcheck disable=SC2034
 WARNINGS=0
-# shellcheck disable=SC2034
 ERRORS=0
 
 ################################################################################

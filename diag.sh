@@ -15,7 +15,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/utils.sh
 if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
-    # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/lib/utils.sh"
 else
     echo "Error: lib/utils.sh not found."
@@ -32,11 +31,8 @@ TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 GREY=${GREY:-'\033[0;90m'}
 
 # State Tracking (Globals)
-# shellcheck disable=SC2034
 ERRORS=0
-# shellcheck disable=SC2034
 WARNINGS=0
-# shellcheck disable=SC2034
 CHECKS_PASSED=0
 WARN_LIST=()
 ERROR_LIST=()
