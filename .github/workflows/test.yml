@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Check Syntax
+        run: |
+          bash -n setup.sh
+          bash -n optimize.sh
+          bash -n diag.sh
+          bash -n lib/utils.sh
+
+      - name: Run Unit Tests
+        run: bats tests/

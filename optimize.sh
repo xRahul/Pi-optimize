@@ -11,24 +11,24 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# --- Source Library ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/utils.sh
+if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/utils.sh"
+else
+    echo "Error: lib/utils.sh not found."
+    exit 1
+fi
+
 # --- Constants & Environment ---
 SCRIPT_VERSION="4.2.1"
 CONFIG_FILE="/boot/firmware/config.txt"
 BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
 LOCK_FILE="/run/rpi-optimize.lock"
-BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
-
-# Counters
+# Counters (Globals used by utils.sh)
 OPTIMIZATIONS_APPLIED=0
 OPTIMIZATIONS_SKIPPED=0
 WARNINGS=0
@@ -38,18 +38,19 @@ ERRORS=0
 # Utility Functions
 ################################################################################
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
-log_pass() { echo -e "${GREEN}[✓]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_APPLIED+=1)); }
-log_skip() { echo -e "${YELLOW}[⊘]${NC} $1" | tee -a "$LOG_FILE"; ((OPTIMIZATIONS_SKIPPED+=1)); }
-log_warn() { echo -e "${YELLOW}[!]${NC} $1" | tee -a "$LOG_FILE"; ((WARNINGS+=1)); }
-log_error() { echo -e "${RED}[✗]${NC} $1" | tee -a "$LOG_FILE"; ((ERRORS+=1)); }
-log_section() { echo -e "\n${CYAN}=== $1 ===${NC}" | tee -a "$LOG_FILE"; }
-log_success() { echo -e "\n${GREEN}$1${NC}" | tee -a "$LOG_FILE"; }
+usage() {
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    echo "  -v, --version Show script version"
+}
 
+# shellcheck disable=SC2317
 cleanup() {
     rm -f "$LOCK_FILE"
 }
 
+# shellcheck disable=SC2317
 trap_error() {
     local line=$1
     local msg=$2
@@ -61,19 +62,12 @@ trap_error() {
 trap 'trap_error ${LINENO} "$BASH_COMMAND"' ERR
 trap cleanup EXIT
 
-require_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}ERROR: This script must be run as root (sudo)${NC}"
-        exit 1
-    fi
-}
-
 acquire_lock() {
     if [[ -f "$LOCK_FILE" ]]; then
-        local pid=$(cat "$LOCK_FILE")
+        local pid
+        pid=$(cat "$LOCK_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             log_error "Script is already running (PID: $pid)"
-            exit 1
         fi
     fi
     echo $$ > "$LOCK_FILE"
@@ -87,31 +81,6 @@ ensure_dependencies() {
     fi
 }
 
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-files_differ() {
-    local file1="$1"
-    local file2="$2"
-    if [[ ! -f "$file1" ]]; then return 0; fi # If target doesn't exist, they differ (need to write)
-    if cmp -s "$file1" "$file2"; then
-        return 1 # They are the same
-    else
-        return 0 # They differ
-    fi
-}
-
-backup_file() {
-    local file="$1"
-    if [[ -f "$file" ]]; then
-        mkdir -p "$BACKUP_DIR"
-        local bkp="${BACKUP_DIR}/$(basename "$file").${BACKUP_TIMESTAMP}"
-        cp "$file" "$bkp"
-        log_info "Backup created: $bkp"
-    fi
-}
-
 ################################################################################
 # 1. Hardware & Thermal
 ################################################################################
@@ -119,11 +88,8 @@ backup_file() {
 optimize_hardware() {
     log_section "HARDWARE & THERMAL"
     
-    [[ -f "$CONFIG_FILE" ]] || { log_error "$CONFIG_FILE not found"; return; }
-    # No changes needed here, grep checks prevent duplication
-    # backup_file is only called if we intend to write? 
-    # Actually, optimize_hardware logic is append-only with grep checks. 
-    # We can keep backup_file here as a safety measure before any potential edit.
+    [[ -f "$CONFIG_FILE" ]] || log_error "$CONFIG_FILE not found"
+
     backup_file "$CONFIG_FILE"
 
     # Pi 5 Aggressive Cooling
@@ -241,7 +207,8 @@ optimize_storage() {
 
     # 2. I/O Scheduler (BFQ for USB/SD)
     log_info "Configuring BFQ scheduler..."
-    local devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd|mmc" | awk '{print $1}' || echo "")
+    local devices
+    devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd|mmc" | awk '{print $1}' || echo "")
     if [[ -z "$devices" ]]; then
         log_skip "No USB/SD/MMC devices found for I/O scheduler optimization"
     else
@@ -251,6 +218,7 @@ optimize_storage() {
                 if grep -q "\[bfq\]" "/sys/block/$dev/queue/scheduler"; then
                     log_skip "BFQ already active for $dev"
                 elif grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
+                    # shellcheck disable=SC2015
                     echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
                 else
                     log_skip "BFQ not available for $dev"
@@ -352,14 +320,17 @@ setup_usb_automount() {
     # Check if USB device needs to be added to fstab
     
     # Identify root device to exclude it
-    local root_dev=$(findmnt -n -o SOURCE /)
-    local root_disk=$(lsblk -no PKNAME "$root_dev" 2>/dev/null || echo "$root_dev")
+    local root_dev
+    root_dev=$(findmnt -n -o SOURCE /)
+    local root_disk
+    root_disk=$(lsblk -no PKNAME "$root_dev" 2>/dev/null || echo "$root_dev")
     # Clean up root_disk (remove /dev/ prefix if present)
     root_disk=$(basename "$root_disk")
 
     # Look for USB/SD/MMC PARTITIONS, excluding root disk
     # We want partitions (TYPE="part") on specific transports (TRAN="usb" etc)
-    local usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
+    local usb_device
+    usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
         grep -E "usb|sd|mmc" | \
         grep "part" | \
         grep -v "$root_disk" | \
@@ -377,7 +348,8 @@ setup_usb_automount() {
         return
     fi
     
-    local usb_uuid=$(blkid -s UUID -o value "$usb_dev_path" 2>/dev/null)
+    local usb_uuid
+    usb_uuid=$(blkid -s UUID -o value "$usb_dev_path" 2>/dev/null)
     if [[ -z "$usb_uuid" ]]; then
         log_warn "Could not determine UUID for $usb_dev_path. Manual configuration required."
         return
@@ -386,13 +358,14 @@ setup_usb_automount() {
     # Check if already in fstab by UUID or Mount Point
     if grep -q "UUID=$usb_uuid" "$fstab_file"; then
         log_skip "USB mount already configured in fstab (UUID: $usb_uuid)"
-    elif grep -q "[[:space:]]$mount_path[[:space:]]" "$fstab_file"; then
+    elif grep -q "[[:space:]]${mount_path}[[:space:]]" "$fstab_file"; then
         log_warn "Mount point $mount_path already exists in fstab with a different UUID. Skipping to avoid conflicts."
     else
         backup_file "$fstab_file"
         
         # Detect filesystem type
-        local fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
+        local fs_type
+        fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
         
         # Add appropriate mount options based on filesystem
         local mount_opts="defaults,nofail,noatime"
@@ -458,7 +431,8 @@ optimize_docker() {
     local final_config="$base_config"
     if mountpoint -q /mnt/usb; then
         # Check filesystem type compatibility
-        local fs_type=$(stat -f -c %T /mnt/usb 2>/dev/null || echo "unknown")
+        local fs_type
+        fs_type=$(stat -f -c %T /mnt/usb 2>/dev/null || echo "unknown")
         if [[ "$fs_type" == "msdos" || "$fs_type" == "vfat" || "$fs_type" == "exfat" || "$fs_type" == "fuseblk" ]]; then
              log_warn "USB mount /mnt/usb is $fs_type (incompatible with Docker data-root). Skipping data-root optimization."
         else
@@ -477,8 +451,10 @@ optimize_docker() {
     if [[ -f "$docker_config" ]]; then
         if command_exists jq; then
             # Idempotency Check: Compare existing vs new (merged)
-            local current_json=$(jq -S . "$docker_config")
-            local new_json=$(jq -s '.[0] * .[1]' "$docker_config" <(echo "$final_config") | jq -S .)
+            local current_json
+            current_json=$(jq -S . "$docker_config")
+            local new_json
+            new_json=$(jq -s '.[0] * .[1]' "$docker_config" <(echo "$final_config") | jq -S .)
             
             if [[ "$current_json" == "$new_json" ]]; then
                 log_skip "Docker daemon.json already optimized"
@@ -488,6 +464,7 @@ optimize_docker() {
                 log_pass "Docker daemon.json optimized (merged)"
                 
                 systemctl daemon-reload
+                # shellcheck disable=SC2015
                 systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
             fi
         else
@@ -498,6 +475,7 @@ optimize_docker() {
         log_pass "Docker daemon.json optimized (created)"
         
         systemctl daemon-reload
+        # shellcheck disable=SC2015
         systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
     fi
 }
@@ -658,7 +636,8 @@ optimize_memory() {
     fi
 
     # Disable runtime disk swap
-    local other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
+    local other_swaps
+    other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
     if [[ -n "$other_swaps" ]]; then
         for s in $other_swaps; do
             swapoff "$s" 2>/dev/null || true
@@ -726,18 +705,8 @@ EOF
 # 7b. Ollama Service
 ################################################################################
 
-# Helper for prompts in optimize.sh
 prompt_update() {
-    local prompt="$1"
-    # Non-interactive check: if not running in a terminal, assume No
-    if [[ ! -t 0 ]]; then return 1; fi 
-    
-    # Read with timeout (15s) to prevent hanging automated runs
-    read -t 15 -p "$(echo -e ${CYAN}$prompt${NC} [y/N]: )" -r response || return 1
-    case "$response" in
-        [yY]*) return 0 ;;
-        *) return 1 ;;
-    esac
+    confirm_action "$1"
 }
 
 optimize_ollama_service() {
@@ -751,9 +720,11 @@ optimize_ollama_service() {
 
         # --- Update Check ---
         log_info "Checking for Ollama updates..."
-        local current_ver=$(ollama --version 2>/dev/null | awk '{print $3}')
+        local current_ver
+        current_ver=$(ollama --version 2>/dev/null | awk '{print $3}')
         # Use a short timeout for the network call
-        local latest_ver=$(curl -s --max-time 3 https://api.github.com/repos/ollama/ollama/releases/latest | jq -r .tag_name 2>/dev/null | sed 's/^v//' || echo "")
+        local latest_ver
+        latest_ver=$(curl -s --max-time 3 https://api.github.com/repos/ollama/ollama/releases/latest | jq -r .tag_name 2>/dev/null | sed 's/^v//' || echo "")
 
         if [[ -n "$latest_ver" ]] && [[ -n "$current_ver" ]]; then
             if [[ "$current_ver" != "$latest_ver" ]]; then
@@ -781,13 +752,15 @@ optimize_ollama_service() {
         
         # Check if we are using USB storage
         if [ -f "$override_file" ] && grep -q "/mnt/usb" "$override_file"; then
-            local models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "")
+            local models_dir
+            models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "")
             [ -z "$models_dir" ] && models_dir="/mnt/usb/ollama"
             
             if ! grep -q "RequiresMountsFor" "$override_file" || ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file"; then
                 log_info "Applying optimizations & boot-order fix to Ollama..."
                 # Extract existing Environment vars, filtering out ones we are about to add/enforce
-                local envs=$(grep "Environment=" "$override_file" | grep -vE "OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS")
+                local envs
+                envs=$(grep "Environment=" "$override_file" | grep -vE "OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS")
                 
                 cat > "$override_file" <<EOF
 [Unit]
@@ -806,9 +779,21 @@ EOF
             fi
             
             # Ensure permissions
-            if ! groups ollama | grep -q "\brahul\b"; then
-                usermod -aG rahul ollama
-                log_pass "Ollama user added to rahul group for USB access"
+            local target_user="${SUDO_USER:-$USER}"
+            # Attempt to use detected user
+            if [[ -n "$target_user" && "$target_user" != "root" ]]; then
+                if ! groups ollama | grep -q "\b${target_user}\b"; then
+                    usermod -aG "$target_user" ollama
+                    log_pass "Ollama user added to $target_user group for USB access"
+                fi
+            else
+                 # Fallback to 'rahul' if present, as in original script
+                 if id "rahul" &>/dev/null; then
+                     if ! groups ollama | grep -q "\brahul\b"; then
+                        usermod -aG rahul ollama
+                        log_pass "Ollama user added to rahul group for USB access"
+                     fi
+                 fi
             fi
         fi
     else
@@ -851,6 +836,42 @@ system_maintenance() {
 ################################################################################
 
 main() {
+    # Parse arguments
+    while getopts ":hv-:" opt; do
+        case ${opt} in
+            h)
+                usage
+                exit 0
+                ;;
+            v)
+                echo "$SCRIPT_VERSION"
+                exit 0
+                ;;
+            -)
+                case "${OPTARG}" in
+                    help)
+                        usage
+                        exit 0
+                        ;;
+                    version)
+                        echo "$SCRIPT_VERSION"
+                        exit 0
+                        ;;
+                    *)
+                        echo "Invalid option: --${OPTARG}" >&2
+                        usage
+                        exit 1
+                        ;;
+                esac
+                ;;
+            \?)
+                echo "Invalid option: -${OPTARG}" >&2
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
     require_root
     acquire_lock
     ensure_dependencies
