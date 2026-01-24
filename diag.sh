@@ -11,23 +11,26 @@
 set -u
 # We don't use 'set -e' to allow the script to continue after a failed check
 
+# --- Source Library ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/utils.sh
+if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/utils.sh"
+else
+    echo "Error: lib/utils.sh not found."
+    exit 1
+fi
+
 # --- Constants ---
 SCRIPT_VERSION="4.2.1"
 LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-GREY='\033[0;90m'
-NC='\033[0m'
+# Colors are already imported from lib/utils.sh, but we define GREY here if missing
+GREY=${GREY:-'\033[0;90m'}
 
-# State Tracking
+# State Tracking (Globals)
 ERRORS=0
 WARNINGS=0
 CHECKS_PASSED=0
@@ -52,9 +55,12 @@ print_header() {
     echo -e "${GREY}Timestamp: $(date)${NC}\n"
 }
 
-log_section() {
+# Override log_section for diag specific formatting if needed, or stick with utils.
+# But existing diag.sh has a specific separator line.
+log_section_diag() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
-    echo -e "${GREY}$(printf '%*s' "$TERM_WIDTH" '' | tr ' ' '-')"${NC}
+    # shellcheck disable=SC2086
+    echo -e "${GREY}$(printf '%*s' "$TERM_WIDTH" '' | tr ' ' '-')""${NC}"
 }
 
 report_pass() {
@@ -82,10 +88,6 @@ report_info() {
     echo -e "${CYAN}[INFO]${NC} $1"
 }
 
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
 # Floating point comparison using awk
 is_greater() { awk -v n1="$1" -v n2="$2" 'BEGIN {if (n1>n2) exit 0; exit 1}'; }
 is_less() { awk -v n1="$1" -v n2="$2" 'BEGIN {if (n1<n2) exit 0; exit 1}'; }
@@ -95,25 +97,29 @@ is_less() { awk -v n1="$1" -v n2="$2" 'BEGIN {if (n1<n2) exit 0; exit 1}'; }
 ################################################################################
 
 check_hardware() {
-    log_section "HARDWARE HEALTH (Raspberry Pi 5)"
+    log_section_diag "HARDWARE HEALTH (Raspberry Pi 5)"
 
     # Board Info
     if [ -f /proc/device-tree/model ]; then
-        local model=$(tr -d '\0' < /proc/device-tree/model)
+        local model
+        model=$(tr -d '\0' < /proc/device-tree/model)
         report_info "Model: $model"
     fi
     report_info "Kernel: $(uname -r)"
 
     # Firmware
     if command_exists vcgencmd; then
-        local fw_version=$(vcgencmd version | head -n 1)
+        local fw_version
+        fw_version=$(vcgencmd version | head -n 1)
         report_info "Firmware: $fw_version"
     fi
 
     # Temperature
-    local temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    local temp_raw
+    temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
     if [ -n "$temp_raw" ]; then
-        local temp_c=$(awk "BEGIN {printf \"%.1f\", $temp_raw/1000}")
+        local temp_c
+        temp_c=$(awk "BEGIN {printf \"%.1f\", $temp_raw/1000}")
         if is_less "$temp_c" "60"; then
             report_pass "Temperature: ${temp_c}°C (Optimal)"
         elif is_less "$temp_c" "80"; then
@@ -127,24 +133,17 @@ check_hardware() {
 
     # Throttling & Power
     if command_exists vcgencmd; then
-        local throttled=$(vcgencmd get_throttled | cut -d= -f2)
+        local throttled
+        throttled=$(vcgencmd get_throttled | cut -d= -f2)
         if [ "$throttled" == "0x0" ]; then
             report_pass "Power/Throttling: Status OK (0x0)"
         else
             report_fail "Throttling Detected: Code $throttled" "Check power supply (need 5V/5A for Pi 5) or cooling."
-            # Decode common bits
-            # Bit 0: Under-voltage detected
-            # Bit 1: Arm frequency capped
-            # Bit 2: Currently throttled
-            # Bit 3: Soft temperature limit active
-            # Bit 16: Under-voltage has occurred
-            # Bit 17: Arm frequency capped has occurred
-            # Bit 18: Throttling has occurred
-            # Bit 19: Soft temperature limit has occurred
         fi
 
         # Voltage (Core)
-        local volts=$(vcgencmd measure_volts core | cut -d= -f2)
+        local volts
+        volts=$(vcgencmd measure_volts core | cut -d= -f2)
         report_info "Core Voltage: $volts"
     fi
 
@@ -162,10 +161,11 @@ check_hardware() {
 ################################################################################
 
 check_resources() {
-    log_section "SYSTEM RESOURCES"
+    log_section_diag "SYSTEM RESOURCES"
 
     # CPU Load
-    local load_1m=$(uptime | awk -F'load average:' '{print $2}' | cut -d, -f1 | xargs)
+    local load_1m
+    load_1m=$(uptime | awk -F'load average:' '{print $2}' | cut -d, -f1 | xargs)
     # Pi 5 has 4 cores. Load > 4 is heavy.
     if is_less "$load_1m" "3.0"; then
         report_pass "Load Average (1m): $load_1m"
@@ -176,9 +176,12 @@ check_resources() {
     fi
 
     # Memory
-    local mem_total=$(free -m | awk '/^Mem:/{print $2}')
-    local mem_avail=$(free -m | awk '/^Mem:/{print $7}')
-    local mem_used_perc=$(awk "BEGIN {printf \"%.1f\", 100-($mem_avail/$mem_total*100)}")
+    local mem_total
+    mem_total=$(free -m | awk '/^Mem:/{print $2}')
+    local mem_avail
+    mem_avail=$(free -m | awk '/^Mem:/{print $7}')
+    local mem_used_perc
+    mem_used_perc=$(awk "BEGIN {printf \"%.1f\", 100-($mem_avail/$mem_total*100)}")
     
     if is_less "$mem_used_perc" "85"; then
         report_pass "Memory Usage: $mem_used_perc% ($mem_avail MB available)"
@@ -203,10 +206,11 @@ check_resources() {
 ################################################################################
 
 check_storage() {
-    log_section "STORAGE & FILESYSTEMS"
+    log_section_diag "STORAGE & FILESYSTEMS"
 
     # Root Filesystem
-    local root_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+    local root_usage
+    root_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
     if [ "$root_usage" -lt 85 ]; then
         report_pass "Root Partition: ${root_usage}% used"
     else
@@ -218,11 +222,13 @@ check_storage() {
         report_pass "Mount: $USB_MOUNT_POINT is mounted"
         
         # Check Filesystem Type
-        local fs_type=$(findmnt -n -o FSTYPE -T "$USB_MOUNT_POINT")
+        local fs_type
+        fs_type=$(findmnt -n -o FSTYPE -T "$USB_MOUNT_POINT")
         report_info "Filesystem: $fs_type"
 
         # Check Options (noatime, commit)
-        local fs_opts=$(findmnt -n -o OPTIONS -T "$USB_MOUNT_POINT")
+        local fs_opts
+        fs_opts=$(findmnt -n -o OPTIONS -T "$USB_MOUNT_POINT")
         if [[ "$fs_opts" == *"noatime"* ]]; then
             report_pass "Mount Option: noatime active"
         else
@@ -252,7 +258,8 @@ check_storage() {
     fi
 
     # Kernel Errors (I/O)
-    local io_errors=$(dmesg | grep -iE "I/O error|EXT4-fs error|corruption" | tail -n 5)
+    local io_errors
+    io_errors=$(dmesg | grep -iE "I/O error|EXT4-fs error|corruption" | tail -n 5)
     if [ -z "$io_errors" ]; then
         report_pass "Kernel Logs: No recent disk errors"
     else
@@ -262,9 +269,11 @@ check_storage() {
 
     # SMART Health Check
     if command_exists smartctl; then
-        local disk_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null | sed 's/[0-9]*$//')
+        local disk_dev
+        disk_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null | sed 's/[0-9]*$//')
         if [ -b "$disk_dev" ]; then
-            local smart_status=$(smartctl -H "$disk_dev" 2>/dev/null | grep -i "test result" | cut -d: -f2 | xargs)
+            local smart_status
+            smart_status=$(smartctl -H "$disk_dev" 2>/dev/null | grep -i "test result" | cut -d: -f2 | xargs)
             if [[ "$smart_status" == "PASSED" ]]; then
                 report_pass "SMART Health: PASSED ($disk_dev)"
             elif [[ -z "$smart_status" ]]; then
@@ -281,7 +290,7 @@ check_storage() {
 ################################################################################
 
 check_docker() {
-    log_section "DOCKER HEALTH"
+    log_section_diag "DOCKER HEALTH"
 
     if ! command_exists docker; then
         report_fail "Docker: Not installed"
@@ -296,14 +305,18 @@ check_docker() {
     report_pass "Docker Service: Running"
 
     # Data Root
-    local data_root=$(docker info --format '{{.DockerRootDir}}')
+    local data_root
+    data_root=$(docker info --format '{{.DockerRootDir}}')
     report_info "Data Root: $data_root"
     
     # Check backing device transport
-    local backing_dev=$(findmnt -n -o SOURCE --target "$data_root" 2>/dev/null)
-    local parent_dev=$(lsblk -nd -o PKNAME -p "$backing_dev" 2>/dev/null)
+    local backing_dev
+    backing_dev=$(findmnt -n -o SOURCE --target "$data_root" 2>/dev/null)
+    local parent_dev
+    parent_dev=$(lsblk -nd -o PKNAME -p "$backing_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$backing_dev"
-    local transport=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+    local transport
+    transport=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
 
     if [[ "$transport" == "usb" || "$transport" == "nvme" ]]; then
         report_pass "Storage Medium: $transport (Safe)"
@@ -315,7 +328,8 @@ check_docker() {
     fi
 
     # Logging Driver
-    local log_driver=$(docker info --format '{{.LoggingDriver}}')
+    local log_driver
+    log_driver=$(docker info --format '{{.LoggingDriver}}')
     if [[ "$log_driver" == "json-file" ]]; then
         report_pass "Log Driver: json-file"
     else
@@ -323,10 +337,14 @@ check_docker() {
     fi
 
     # Container States
-    local running=$(docker ps -q | wc -l)
-    local total=$(docker ps -aq | wc -l)
-    local exited=$(docker ps -aq -f status=exited | wc -l)
-    local restarting=$(docker ps -aq -f status=restarting | wc -l)
+    local running
+    running=$(docker ps -q | wc -l)
+    local total
+    total=$(docker ps -aq | wc -l)
+    local exited
+    exited=$(docker ps -aq -f status=exited | wc -l)
+    local restarting
+    restarting=$(docker ps -aq -f status=restarting | wc -l)
 
     report_info "Containers: $running Running / $total Total"
     
@@ -353,7 +371,7 @@ check_docker() {
 ################################################################################
 
 check_network() {
-    log_section "NETWORK & SECURITY"
+    log_section_diag "NETWORK & SECURITY"
 
     # Internet
     if ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
@@ -373,7 +391,8 @@ check_network() {
 
     # Firewall
     if command_exists ufw; then
-        local ufw_status=$(ufw status | grep "Status" | awk '{print $2}')
+        local ufw_status
+        ufw_status=$(ufw status | grep "Status" | awk '{print $2}')
         if [ "$ufw_status" == "active" ]; then
             report_pass "Firewall (UFW): Active"
             # Check for specific Ollama fix
@@ -450,7 +469,7 @@ main() {
     check_docker
     check_network
 
-    log_section "DIAGNOSTIC SUMMARY"
+    log_section_diag "DIAGNOSTIC SUMMARY"
     local total_checks=$((CHECKS_PASSED + WARNINGS + ERRORS))
     local score=0
     if [ $total_checks -gt 0 ]; then

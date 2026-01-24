@@ -7,51 +7,33 @@
 # License: MIT (Copyright 2025 Rahul)
 ################################################################################
 
-set -o pipefail
+set -euo pipefail
 IFS=$'\n\t'
+
+# --- Source Library ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/utils.sh
+if [[ -f "${SCRIPT_DIR}/lib/utils.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/utils.sh"
+else
+    echo "Error: lib/utils.sh not found."
+    exit 1
+fi
 
 # --- Constants ---
 SCRIPT_VERSION="4.2.1"
+# shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
-CONFIG_FILE="/boot/firmware/config.txt"
-BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# CONFIG_FILE="/boot/firmware/config.txt" # Unused in setup.sh directly, used in optimize.sh
+# BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S) # Unused in setup.sh
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# --- Helper Functions ---
 
-# Counters
-CHECKS_PASSED=0
-CHECKS_FAILED=0
-WARNINGS=0
-
-# --- Logging ---
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_pass() { echo -e "${GREEN}[✓]${NC} $1"; ((CHECKS_PASSED++)); }
-log_fail() { echo -e "${RED}[✗]${NC} $1"; ((CHECKS_FAILED++)); }
-log_skip() { echo -e "${YELLOW}[⊘]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[!]${NC} $1"; ((WARNINGS++)); }
-log_section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
-log_error() { echo -e "\n${RED}ERROR: $1${NC}"; exit 1; }
-
-# --- Utilities ---
-require_root() { [[ $EUID -ne 0 ]] && log_error "Run as root (sudo)"; }
-command_exists() { command -v "$1" >/dev/null 2>&1; }
-confirm_action() {
-    local prompt="$1"
-    local response
-    while true; do
-        read -p "$(echo -e ${CYAN}$prompt${NC} [y/N]: )" -r response
-        case "$response" in
-            [yY]*) return 0 ;; 
-            [nN]*|"") return 1 ;; 
-            *) echo "Please answer y or n." ;; 
-        esac
-    done
+usage() {
+    echo "Usage: $0 [options]"
+    echo "Options:"
+    echo "  -h, --help    Show this help message"
+    echo "  -v, --version Show script version"
 }
 
 wait_for_apt_lock() {
@@ -72,6 +54,15 @@ wait_for_apt_lock() {
     done
 }
 
+get_target_user() {
+    local target_user="${SUDO_USER:-}"
+    if [[ -z "$target_user" ]]; then
+        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
+        log_warn "SUDO_USER not set. Defaulting to user: $target_user"
+    fi
+    echo "$target_user"
+}
+
 ################################################################################
 # 1. Pre-flight Checks
 ################################################################################
@@ -79,9 +70,12 @@ wait_for_apt_lock() {
 preflight_checks() {
     log_section "PRE-FLIGHT CHECKS"
     
-    [[ ! -f /etc/os-release ]] && log_error "OS release unknown"
+    if [[ ! -f /etc/os-release ]]; then
+        log_error "OS release unknown"
+    fi
+    # shellcheck disable=SC1091
     source /etc/os-release
-    log_info "OS: $PRETTY_NAME"
+    log_info "OS: ${PRETTY_NAME:-Unknown}"
     
     [[ "$(uname -m)" != "aarch64" ]] && log_error "64-bit ARM required"
     log_pass "Architecture: aarch64"
@@ -90,16 +84,19 @@ preflight_checks() {
     log_pass "Connectivity: OK"
 
     # Boot Drive Detection
-    local boot_dev=$(findmnt -n -o SOURCE /)
+    local boot_dev
+    boot_dev=$(findmnt -n -o SOURCE /)
     # Get parent disk if partition, otherwise use device itself. Use -d to suppress children, -p for full path.
-    local parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
+    local parent_dev
+    parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
-    local boot_tran=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+    local boot_tran
+    boot_tran=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
     
     if [[ "$boot_tran" == "usb" ]]; then
         log_pass "Boot Drive: USB Flash/SSD detected"
     else
-        log_warn "Boot Drive: $boot_tran (Not USB). Ensure you are booting from your flash drive for best performance."
+        log_warn "Boot Drive: ${boot_tran:-Unknown} (Not USB). Ensure you are booting from your flash drive for best performance."
     fi
 }
 
@@ -111,6 +108,7 @@ system_core() {
     log_section "SYSTEM CORE"
     
     wait_for_apt_lock
+    # shellcheck disable=SC2015
     apt-get update && apt-get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
     
@@ -147,12 +145,8 @@ docker_suite() {
     
     systemctl enable --now docker
     
-    # Detect target user (SUDO_USER, or UID 1000, or current user)
-    local target_user="${SUDO_USER:-}"
-    if [[ -z "$target_user" ]]; then
-        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
-        log_warn "SUDO_USER not set. Defaulting to user: $target_user"
-    fi
+    local target_user
+    target_user=$(get_target_user)
 
     if [[ "$target_user" != "root" ]]; then
         usermod -aG docker "$target_user" && log_pass "User $target_user added to docker group"
@@ -175,19 +169,19 @@ nodejs_tooling() {
     log_pass "Node.js: $(node -v)"
     
     # Global npm config for non-root
-    local target_user="${SUDO_USER:-}"
-    if [[ -z "$target_user" ]]; then
-        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
-    fi
+    local target_user
+    target_user=$(get_target_user)
 
     if [[ "$target_user" != "root" ]]; then
-        local target_home=$(getent passwd "$target_user" | cut -d: -f6)
+        local target_home
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
         local npm_global="$target_home/.npm-global"
         mkdir -p "$npm_global"
         chown -R "$target_user" "$npm_global"
         sudo -u "$target_user" npm config set prefix "$npm_global"
         
         if ! grep -q ".npm-global/bin" "$target_home/.bashrc"; then
+            # shellcheck disable=SC2016
             echo 'export PATH=~/.npm-global/bin:$PATH' >> "$target_home/.bashrc"
         fi
         log_pass "npm global prefix configured"
@@ -248,8 +242,16 @@ install_ollama() {
                 if confirm_action "Store Ollama models on USB drive (Highly Recommended)?"; then
                     models_dir="/mnt/usb/ollama"
                     mkdir -p "$models_dir"
+                    # Ensure ollama user exists (installer should have created it)
                     chown ollama:ollama "$models_dir" 2>/dev/null || true
-                    usermod -aG rahul ollama 2>/dev/null || true
+
+                    # Fix: Use detected target user instead of hardcoded 'rahul'
+                    local target_user
+                    target_user=$(get_target_user)
+                    if [[ -n "$target_user" && "$target_user" != "root" ]]; then
+                         usermod -aG "$target_user" ollama 2>/dev/null || true
+                    fi
+
                     log_pass "Model storage configured: $models_dir"
                     optimize_config=true
                 fi
@@ -312,7 +314,7 @@ usb_optimization() {
     log_section "USB & OPTIMIZATION"
     
     # Prepare USB mount directory
-    local mount_path="/mnt/usb"
+    local mount_path="${USB_MOUNT_PATH}"
     if [[ ! -d "$mount_path" ]]; then
         mkdir -p "$mount_path"
         log_pass "Mount directory created: $mount_path"
@@ -321,13 +323,13 @@ usb_optimization() {
     fi
     
     # Run optimize.sh for system-wide tuning
-    if [[ -f "./optimize.sh" ]]; then
-        chmod +x ./optimize.sh
+    if [[ -f "${SCRIPT_DIR}/optimize.sh" ]]; then
+        chmod +x "${SCRIPT_DIR}/optimize.sh"
         log_info "Running optimize.sh..."
-        ./optimize.sh || log_warn "optimize.sh encountered issues but continuing"
+        "${SCRIPT_DIR}/optimize.sh" || log_warn "optimize.sh encountered issues but continuing"
         log_pass "Optimizations applied"
     else
-        log_error "optimize.sh not found in current directory"
+        log_error "optimize.sh not found in directory: ${SCRIPT_DIR}"
     fi
     
     # Verify USB mount was configured
@@ -379,6 +381,42 @@ EOF
 ################################################################################
 
 main() {
+    # Parse arguments
+    while getopts ":hv-:" opt; do
+        case ${opt} in
+            h)
+                usage
+                exit 0
+                ;;
+            v)
+                echo "$SCRIPT_VERSION"
+                exit 0
+                ;;
+            -)
+                case "${OPTARG}" in
+                    help)
+                        usage
+                        exit 0
+                        ;;
+                    version)
+                        echo "$SCRIPT_VERSION"
+                        exit 0
+                        ;;
+                    *)
+                        echo "Invalid option: --${OPTARG}" >&2
+                        usage
+                        exit 1
+                        ;;
+                esac
+                ;;
+            \?)
+                echo "Invalid option: -${OPTARG}" >&2
+                usage
+                exit 1
+                ;;
+        esac
+    done
+
     require_root
     preflight_checks
     system_core
