@@ -120,13 +120,31 @@ system_core() {
         "busybox-syslogd"
     )
     
-    for pkg in "${packages[@]}"; do
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-            log_skip "$pkg already installed"
-        else
-            log_info "Installing $pkg..."
-            apt-get install -y "$pkg" || log_warn "Failed: $pkg"
+    # Optimize: Bulk check installed packages
+    declare -A installed_map
+    # shellcheck disable=SC2034
+    while IFS=' ' read -r status name; do
+        if [[ "$status" == "ii" ]]; then
+            installed_map["$name"]=1
         fi
+    done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null)
+
+    for pkg in "${packages[@]}"; do
+        if [[ -n "${installed_map[$pkg]:-}" ]]; then
+            log_skip "$pkg already installed"
+            continue
+        fi
+
+        # Specific conflict checks
+        if [[ "$pkg" == "busybox-syslogd" ]]; then
+             if [[ -n "${installed_map[rsyslog]:-}" ]]; then
+                 log_warn "Skipping $pkg: rsyslog detected (conflict)"
+                 continue
+             fi
+        fi
+
+        log_info "Installing $pkg..."
+        apt-get install -y "$pkg" || log_warn "Failed: $pkg"
     done
     log_pass "Core dependencies installed"
 }
