@@ -420,7 +420,7 @@ check_network() {
     fi
 
     # Connectivity Check: n8n -> Ollama
-    if command_exists docker && docker ps --format '{{.Names}}' | grep -q "^n8n$"; then
+    if command_exists docker && [ -n "$(docker ps -q -f "name=^n8n$")" ]; then
         report_info "Testing connectivity: n8n -> Ollama (host.docker.internal)..."
         if docker exec n8n timeout 5 wget -O- http://host.docker.internal:11434/api/tags >/dev/null 2>&1; then
             report_pass "Connectivity: n8n can reach Ollama"
