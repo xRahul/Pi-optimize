@@ -192,16 +192,17 @@ optimize_cpu() {
 optimize_storage() {
     log_section "STORAGE & I/O"
     
-    backup_file /etc/fstab
+    local fstab_file="${FSTAB_FILE:-/etc/fstab}"
+    backup_file "$fstab_file"
 
     # 1. Root noatime optimization
-    if grep -E "^[^#].*\s/\s" /etc/fstab | grep -q "noatime"; then
+    if grep -E "^[^#].*\s/\s" "$fstab_file" | grep -q "noatime"; then
         log_skip "Root filesystem already has noatime"
     else
         log_info "Adding noatime to root filesystem..."
         # Safely append ,noatime to the options field (4th field) of the root mount
         # Matches: (Start) (device) (mountpoint /) (fs) (options) (dump) (pass)
-        sed -i -E 's/^([^#]\S+\s+\/\s+\S+\s+)(\S+)/\1\2,noatime/' /etc/fstab
+        sed -i -E 's/^([^#]\S+\s+\/\s+\S+\s+)(\S+)/\1\2,noatime/' "$fstab_file"
         log_pass "Root filesystem optimized: noatime"
     fi
 
@@ -212,14 +213,19 @@ optimize_storage() {
     if [[ -z "$devices" ]]; then
         log_skip "No USB/SD/MMC devices found for I/O scheduler optimization"
     else
+        local sys_block_dir="${SYS_BLOCK_DIR:-/sys/block}"
         for dev in $devices; do
-            if [[ -f "/sys/block/$dev/queue/scheduler" ]]; then
+            local sched_file="$sys_block_dir/$dev/queue/scheduler"
+            if [[ -f "$sched_file" ]]; then
+                local sched_content
+                sched_content=$(<"$sched_file")
+
                 # Check if BFQ is selected (surrounded by brackets)
-                if grep -q "\[bfq\]" "/sys/block/$dev/queue/scheduler"; then
+                if [[ "$sched_content" == *"[bfq]"* ]]; then
                     log_skip "BFQ already active for $dev"
-                elif grep -q "bfq" "/sys/block/$dev/queue/scheduler"; then
+                elif [[ "$sched_content" == *"bfq"* ]]; then
                     # shellcheck disable=SC2015
-                    echo "bfq" > "/sys/block/$dev/queue/scheduler" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
+                    echo "bfq" > "$sched_file" 2>/dev/null && log_pass "BFQ set for $dev" || log_warn "Failed to set BFQ for $dev"
                 else
                     log_skip "BFQ not available for $dev"
                 fi
