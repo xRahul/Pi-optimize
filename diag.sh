@@ -337,14 +337,27 @@ check_docker() {
     fi
 
     # Container States
-    local running
-    running=$(docker ps -q | wc -l)
-    local total
-    total=$(docker ps -aq | wc -l)
-    local exited
-    exited=$(docker ps -aq -f status=exited | wc -l)
-    local restarting
-    restarting=$(docker ps -aq -f status=restarting | wc -l)
+    local container_states
+    container_states=$(docker ps -a --format "{{.State}}")
+
+    local running=0
+    local total=0
+    local exited=0
+    local restarting=0
+
+    if [ -n "$container_states" ]; then
+        # Parse all states in one pass
+        read -r running total exited restarting <<< "$(echo "$container_states" | awk '
+            BEGIN {r=0; t=0; e=0; s=0}
+            {
+                t++
+                if ($1 == "running") r++
+                if ($1 == "exited") e++
+                if ($1 == "restarting") s++
+            }
+            END {print r, t, e, s}
+        ')"
+    fi
 
     report_info "Containers: $running Running / $total Total"
     
