@@ -263,7 +263,6 @@ install_ollama() {
                     # Ensure ollama user exists (installer should have created it)
                     chown ollama:ollama "$models_dir" 2>/dev/null || true
 
-                    # Fix: Use detected target user instead of hardcoded 'rahul'
                     local target_user
                     target_user=$(get_target_user)
                     if [[ -n "$target_user" && "$target_user" != "root" ]]; then
