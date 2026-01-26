@@ -176,12 +176,8 @@ check_resources() {
     fi
 
     # Memory
-    local mem_total
-    mem_total=$(free -m | awk '/^Mem:/{print $2}')
-    local mem_avail
-    mem_avail=$(free -m | awk '/^Mem:/{print $7}')
-    local mem_used_perc
-    mem_used_perc=$(awk "BEGIN {printf \"%.1f\", 100-($mem_avail/$mem_total*100)}")
+    local mem_avail mem_used_perc
+    read -r mem_avail mem_used_perc <<< "$(free -m | awk '/^Mem:/{printf "%s %.1f", $7, 100-($7/$2*100)}')"
     
     if is_less "$mem_used_perc" "85"; then
         report_pass "Memory Usage: $mem_used_perc% ($mem_avail MB available)"
