@@ -221,14 +221,12 @@ check_storage() {
     if mountpoint -q "$USB_MOUNT_POINT"; then
         report_pass "Mount: $USB_MOUNT_POINT is mounted"
         
-        # Check Filesystem Type
-        local fs_type
-        fs_type=$(findmnt -n -o FSTYPE -T "$USB_MOUNT_POINT")
+        # Check Filesystem Type & Options
+        local fs_type fs_opts
+        read -r fs_type fs_opts <<< "$(findmnt -n -o FSTYPE,OPTIONS -T "$USB_MOUNT_POINT")"
         report_info "Filesystem: $fs_type"
 
         # Check Options (noatime, commit)
-        local fs_opts
-        fs_opts=$(findmnt -n -o OPTIONS -T "$USB_MOUNT_POINT")
         if [[ "$fs_opts" == *"noatime"* ]]; then
             report_pass "Mount Option: noatime active"
         else
