@@ -165,7 +165,7 @@ check_resources() {
 
     # CPU Load
     local load_1m
-    load_1m=$(uptime | awk -F'load average:' '{print $2}' | cut -d, -f1 | xargs)
+    read -r load_1m _ < /proc/loadavg
     # Pi 5 has 4 cores. Load > 4 is heavy.
     if is_less "$load_1m" "3.0"; then
         report_pass "Load Average (1m): $load_1m"
