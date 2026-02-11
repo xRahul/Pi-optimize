@@ -116,7 +116,11 @@ check_hardware() {
 
     # Temperature
     local temp_raw
-    temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+    if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+        temp_raw=$(< /sys/class/thermal/thermal_zone0/temp)
+    else
+        temp_raw=""
+    fi
     if [ -n "$temp_raw" ]; then
         local temp_c
         temp_c=$(awk "BEGIN {printf \"%.1f\", $temp_raw/1000}")
