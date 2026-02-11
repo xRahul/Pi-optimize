@@ -209,7 +209,7 @@ optimize_storage() {
     # 2. I/O Scheduler (BFQ for USB/SD)
     log_info "Configuring BFQ scheduler..."
     local devices
-    devices=$(lsblk -d -o NAME,TRAN 2>/dev/null | grep -E "usb|sd|mmc" | awk '{print $1}' || echo "")
+    devices=$(lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '/usb|sd|mmc/ {print $1}' || echo "")
     if [[ -z "$devices" ]]; then
         log_skip "No USB/SD/MMC devices found for I/O scheduler optimization"
     else
