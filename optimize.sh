@@ -460,7 +460,7 @@ optimize_docker() {
             local current_json
             current_json=$(jq -S . "$docker_config")
             local new_json
-            new_json=$(jq -s '.[0] * .[1]' "$docker_config" <(echo "$final_config") | jq -S .)
+            new_json=$(jq -S -s '.[0] * .[1]' "$docker_config" <(echo "$final_config"))
             
             if [[ "$current_json" == "$new_json" ]]; then
                 log_skip "Docker daemon.json already optimized"
