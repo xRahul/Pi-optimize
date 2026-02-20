@@ -65,7 +65,7 @@ trap cleanup EXIT
 acquire_lock() {
     if [[ -f "$LOCK_FILE" ]]; then
         local pid
-        pid=$(cat "$LOCK_FILE")
+        pid=$(< "$LOCK_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             log_error "Script is already running (PID: $pid)"
         fi
