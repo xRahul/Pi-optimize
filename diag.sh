@@ -112,9 +112,10 @@ float_to_int() {
     fi
 
     # Remove leading zeros (safely)
-    n="${n#${n%%[!0]*}}"
+    n="${n#"${n%%[!0]*}"}"
     [[ -z "$n" ]] && n="0"
 
+    # shellcheck disable=SC2034
     out="$sign$n"
 }
 
