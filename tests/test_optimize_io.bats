@@ -100,3 +100,28 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "LOG_SKIP: BFQ not available for sda" ]]
 }
+
+@test "optimize_storage adds noatime to root if missing" {
+    # Prepare fstab
+    echo "UUID=1234-5678 / ext4 defaults 0 1" > "$FSTAB_FILE"
+
+    run optimize_storage
+
+    echo "$output"
+    [[ "$output" =~ "Adding noatime to root filesystem" ]]
+    run cat "$FSTAB_FILE"
+    [[ "$output" =~ "defaults,noatime" ]]
+}
+
+@test "optimize_storage skips noatime if present" {
+    # Prepare fstab
+    echo "UUID=1234-5678 / ext4 defaults,noatime 0 1" > "$FSTAB_FILE"
+
+    run optimize_storage
+
+    echo "$output"
+    [[ "$output" =~ "Root filesystem already has noatime" ]]
+    # Ensure it wasn't added twice
+    run grep -c "noatime" "$FSTAB_FILE"
+    [ "$output" -eq 1 ]
+}
