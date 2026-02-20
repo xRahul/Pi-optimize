@@ -302,9 +302,13 @@ check_docker() {
 
     report_pass "Docker Service: Running"
 
+    # Fetch Docker Info Once
+    local docker_info
+    docker_info=$(docker info --format '{{.DockerRootDir}}|{{.LoggingDriver}}')
+    local data_root log_driver
+    IFS='|' read -r data_root log_driver <<< "$docker_info"
+
     # Data Root
-    local data_root
-    data_root=$(docker info --format '{{.DockerRootDir}}')
     report_info "Data Root: $data_root"
     
     # Check backing device transport
@@ -326,8 +330,6 @@ check_docker() {
     fi
 
     # Logging Driver
-    local log_driver
-    log_driver=$(docker info --format '{{.LoggingDriver}}')
     if [[ "$log_driver" == "json-file" ]]; then
         report_pass "Log Driver: json-file"
     else
