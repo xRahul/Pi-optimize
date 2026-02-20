@@ -766,7 +766,7 @@ optimize_ollama_service() {
                 log_info "Applying optimizations & boot-order fix to Ollama..."
                 # Extract existing Environment vars, filtering out ones we are about to add/enforce
                 local envs
-                envs=$(grep "Environment=" "$override_file" | grep -vE "OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS")
+                envs=$(sed -nE '/Environment=/ { /OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS/!p }' "$override_file")
                 
                 cat > "$override_file" <<EOF
 [Unit]
