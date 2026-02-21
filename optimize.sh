@@ -196,7 +196,7 @@ optimize_storage() {
     backup_file "$fstab_file"
 
     # 1. Root noatime optimization
-    if grep -E "^[^#].*\s/\s" "$fstab_file" | grep -q "noatime"; then
+    if grep -qE "^[^#].*\s/\s.*noatime" "$fstab_file"; then
         log_skip "Root filesystem already has noatime"
     else
         log_info "Adding noatime to root filesystem..."
