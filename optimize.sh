@@ -759,7 +759,7 @@ optimize_ollama_service() {
         # Check if we are using USB storage
         if [ -f "$override_file" ] && grep -q "/mnt/usb" "$override_file"; then
             local models_dir
-            models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "")
+            models_dir=$(awk -F'OLLAMA_MODELS=' '/OLLAMA_MODELS=/ {gsub(/"/, "", $2); print $2; exit}' "$override_file")
             [ -z "$models_dir" ] && models_dir="/mnt/usb/ollama"
             
             if ! grep -q "RequiresMountsFor" "$override_file" || ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file"; then
