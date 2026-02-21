@@ -337,10 +337,7 @@ setup_usb_automount() {
     # We want partitions (TYPE="part") on specific transports (TRAN="usb" etc)
     local usb_device
     usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
-        grep -E "usb|sd|mmc" | \
-        grep "part" | \
-        grep -v "$root_disk" | \
-        awk '{print $1}' | head -1)
+        awk -v root="$root_disk" '/usb|sd|mmc/ && /part/ && !index($0, root) { print $1; exit }')
     
     if [[ -z "$usb_device" ]]; then
         log_warn "No USB device detected. Manual fstab configuration may be required."
