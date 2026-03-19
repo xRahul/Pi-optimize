@@ -575,7 +575,7 @@ fix_tailscale_race() {
     fi
 
     # Check if tailscale container exists (running or stopped)
-    if ! docker ps -a --format '{{.Names}}' | grep -q "^tailscale$"; then
+    if [[ -z "$(docker ps -a -q -f name='^tailscale$')" ]]; then
         log_skip "Tailscale container not found. Skipping fix."
         return
     fi
