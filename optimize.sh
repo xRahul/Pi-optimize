@@ -640,7 +640,7 @@ optimize_memory() {
 
     # Disable runtime disk swap
     local other_swaps
-    other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
+    other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}' || true)
     if [[ -n "$other_swaps" ]]; then
         echo "$other_swaps" | xargs -r swapoff 2>/dev/null || true
         log_pass "Active disk swap(s) disabled"
