@@ -452,7 +452,7 @@ check_network() {
         if [ "$ufw_status" == "active" ]; then
             report_pass "Firewall (UFW): Active"
             # Check for specific Ollama fix
-            if ufw status | grep -q "11434/tcp.*ALLOW.*10.8.1.0/24"; then
+            if ufw status | grep -qE "11434(/tcp)?.*ALLOW.*10.8.1.0/24"; then
                 report_pass "Firewall Rule: Ollama (10.8.1.x) -> Port 11434 ALLOWED"
             else
                 report_warn "Firewall Rule: Ollama (10.8.1.x) -> Port 11434 MISSING" "Run optimize.sh to apply fix."
