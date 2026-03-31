@@ -642,9 +642,7 @@ optimize_memory() {
     local other_swaps
     other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}')
     if [[ -n "$other_swaps" ]]; then
-        for s in $other_swaps; do
-            swapoff "$s" 2>/dev/null || true
-        done
+        echo "$other_swaps" | xargs -r swapoff 2>/dev/null || true
         log_pass "Active disk swap(s) disabled"
     fi
 
