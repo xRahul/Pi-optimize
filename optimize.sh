@@ -624,8 +624,7 @@ optimize_memory() {
         log_info "Removing dphys-swapfile..."
         dphys-swapfile swapoff 2>/dev/null || true
         dphys-swapfile uninstall 2>/dev/null || true
-        systemctl stop dphys-swapfile 2>/dev/null || true
-        systemctl disable dphys-swapfile 2>/dev/null || true
+        systemctl disable --now dphys-swapfile 2>/dev/null || true
         # Remove the swap file itself if it still exists
         rm -f /var/swap
         log_pass "dphys-swapfile service disabled and swap file removed"
@@ -633,8 +632,7 @@ optimize_memory() {
 
     # Check for and disable systemd-swap if present
     if systemctl list-unit-files | grep -q systemd-swap; then
-        systemctl stop systemd-swap 2>/dev/null || true
-        systemctl disable systemd-swap 2>/dev/null || true
+        systemctl disable --now systemd-swap 2>/dev/null || true
         log_pass "systemd-swap service disabled"
     fi
 
