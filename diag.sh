@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.2.1"
+SCRIPT_VERSION="4.3.0"
 LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
@@ -31,6 +31,7 @@ TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 GREY=${GREY:-'\033[0;90m'}
 
 # State Tracking (Globals)
+TOTAL_SCORE=100
 ERRORS=0
 WARNINGS=0
 CHECKS_PASSED=0
@@ -74,6 +75,7 @@ report_warn() {
     [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
     WARN_LIST+=("$1|$sol")
     ((WARNINGS++))
+    TOTAL_SCORE=$((TOTAL_SCORE - 5))
 }
 
 report_fail() {
@@ -82,6 +84,7 @@ report_fail() {
     [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
     ERROR_LIST+=("$1|$sol")
     ((ERRORS++))
+    TOTAL_SCORE=$((TOTAL_SCORE - 20))
 }
 
 report_info() {
@@ -225,16 +228,61 @@ check_resources() {
     # Memory
     local mem_avail mem_used_perc
     read -r mem_avail mem_used_perc <<< "$(free -m | awk '/^Mem:/{printf "%s %.1f", $7, 100-($7/$2*100)}')"
-    
+    # Memory Usage: $mem_used_perc% ($mem_avail MB available)
     if is_less "$mem_used_perc" "85"; then
         report_pass "Memory Usage: $mem_used_perc% ($mem_avail MB available)"
     else
         report_warn "Memory Usage: $mem_used_perc% (Low Memory)" "Check memory-hungry containers."
     fi
 
+    # Page Size (Pi 5 / Trixie)
+    local page_size
+    page_size=$(getconf PAGESIZE 2>/dev/null || echo "4096")
+    if [ "$page_size" -gt 4096 ]; then
+        report_info "Page Size: $((page_size / 1024))k (Performance Mode)"
+        # Check min_free_kbytes for 16k pages
+        local min_free
+        min_free=$(sysctl -n vm.min_free_kbytes 2>/dev/null || echo "0")
+        if [ "$min_free" -lt 131072 ]; then
+            report_warn "vm.min_free_kbytes: $min_free is low for 16k pages" "Run optimize.sh to set to 128MB+."
+        else
+            report_pass "vm.min_free_kbytes: $min_free (Optimal for 16k pages)"
+        fi
+    else
+        report_info "Page Size: 4k (Compatibility Mode)"
+    fi
+
+    # Swappiness
+    local swappiness
+    swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+    if grep -q "/dev/zram" /proc/swaps; then
+        if [ "$swappiness" -ge 100 ]; then
+            report_pass "Swappiness: $swappiness (Optimal for ZRAM)"
+        else
+            report_warn "Swappiness: $swappiness (Sub-optimal for ZRAM)" "Run optimize.sh to set to 150."
+        fi
+    else
+        if [ "$swappiness" -le 10 ]; then
+            report_pass "Swappiness: $swappiness (Optimal for Flash protection)"
+        else
+            report_warn "Swappiness: $swappiness (High for disk swap)" "Run optimize.sh to reduce to 10."
+        fi
+    fi
+
     # Swap / ZRAM
     if grep -q "/dev/zram" /proc/swaps; then
         report_pass "ZRAM Swap: Active"
+        # Check generator config
+        if [[ -f /etc/systemd/zram-generator.conf ]]; then
+             report_pass "ZRAM Config: systemd-zram-generator detected"
+        fi
+        # Optional: Check zramctl status
+        if command_exists zramctl; then
+            local z_orig z_comp
+            z_orig=$(zramctl --noheadings --output DATA | awk '{sum+=$1} END {print sum/1024/1024}')
+            z_comp=$(zramctl --noheadings --output COMPR | awk '{sum+=$1} END {print sum/1024/1024}')
+            report_info "ZRAM Stats: $(printf "%.1f" "$z_orig")MB compressed to $(printf "%.1f" "$z_comp")MB"
+        fi
     else
         if grep -q "partition" /proc/swaps || grep -q "file" /proc/swaps; then
             report_warn "Swap: Disk-based swap detected" "Run optimize.sh to switch to ZRAM (better for flash longevity)."
@@ -242,7 +290,34 @@ check_resources() {
             report_warn "Swap: No swap active" "ZRAM is recommended for stability."
         fi
     fi
-}
+
+    # Transparent Hugepages (THP)
+    if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
+        local thp
+        thp=$(grep -o "\[.*\]" /sys/kernel/mm/transparent_hugepage/enabled | tr -d '[]')
+        if [[ "$thp" == "madvise" ]]; then
+            report_pass "THP: set to 'madvise' (Optimal)"
+        else
+            report_warn "THP: set to '$thp'" "Run optimize.sh to set to 'madvise' for database performance."
+        fi
+    else
+        report_info "THP: Not available in this kernel (Standard for RPi)"
+    fi
+
+    # Tmpfs /tmp
+    if findmnt -n -o FSTYPE --target /tmp | grep -q "tmpfs"; then
+        report_pass "/tmp: Using tmpfs (Flash-friendly)"
+    else
+        report_warn "/tmp: Not in tmpfs" "Run optimize.sh to move /tmp to RAM."
+    fi
+
+    if findmnt -n -o FSTYPE --target /var/tmp | grep -q "tmpfs"; then
+        report_pass "/var/tmp: Using tmpfs (Flash-friendly)"
+    else
+        report_info "/var/tmp: Not in tmpfs (Standard)"
+    fi
+    }
+
 
 ################################################################################
 # 3. Storage & Filesystems
@@ -513,6 +588,41 @@ check_network() {
 }
 
 ################################################################################
+# 6. System Services
+################################################################################
+
+check_system_services() {
+    log_section_diag "SYSTEM SERVICES"
+
+    # Logging
+    if pgrep syslogd >/dev/null; then
+        if command_exists logread; then
+            report_pass "Logging: Busybox RAM-based syslog active"
+        else
+            report_pass "Logging: Syslogd active"
+        fi
+    else
+        report_warn "Logging: System logger (syslogd) NOT FOUND" "Ensure busybox-syslogd or rsyslog is installed."
+    fi
+
+    # Entropy
+    if systemctl is-active --quiet rng-tools-debian 2>/dev/null || systemctl is-active --quiet rngd 2>/dev/null; then
+        report_pass "Entropy: Hardware RNG service active"
+    else
+        report_warn "Entropy: Hardware RNG service INACTIVE" "Install/enable rng-tools5 for cryptographic performance."
+    fi
+
+    # Failed Units
+    local failed_units
+    failed_units=$(systemctl list-units --state=failed --no-legend | wc -l)
+    if [ "$failed_units" -eq 0 ]; then
+        report_pass "Systemd: No failed units"
+    else
+        report_fail "Systemd: $failed_units failed units detected" "Check 'systemctl --failed' for details."
+    fi
+}
+
+################################################################################
 # Main
 ################################################################################
 
@@ -524,15 +634,14 @@ main() {
     check_storage
     check_docker
     check_network
+    check_system_services
 
     log_section_diag "DIAGNOSTIC SUMMARY"
-    local total_checks=$((CHECKS_PASSED + WARNINGS + ERRORS))
-    local score=0
-    if [ $total_checks -gt 0 ]; then
-        score=$(( (CHECKS_PASSED * 100) / total_checks ))
-    fi
+    
+    # Ensure score doesn't go below 0
+    [ "$TOTAL_SCORE" -lt 0 ] && TOTAL_SCORE=0
 
-    echo -e "Health Score:  ${CYAN}${score}%${NC}"
+    echo -e "Health Score:  ${CYAN}${TOTAL_SCORE}%${NC}"
     echo -e "Checks Passed: ${GREEN}$CHECKS_PASSED${NC}"
     echo -e "Warnings:      ${YELLOW}$WARNINGS${NC}"
     echo -e "Errors:        ${RED}$ERRORS${NC}"

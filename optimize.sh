@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.2.1"
+SCRIPT_VERSION="4.3.0"
 CONFIG_FILE="/boot/firmware/config.txt"
 export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
@@ -106,10 +106,26 @@ dtparam=fan_temp0=35000
 dtparam=fan_temp0_hyst=5000
 dtparam=fan_temp0_speed=125
 dtparam=fan_temp1=50000
-dtparam=fan_temp1_hyst=5000
 dtparam=fan_temp1_speed=200
 EOF
         log_pass "Fan curve optimized"
+    fi
+
+    # Pi 5 PCIe Gen 3 (Safe for most HATs/NVMe)
+    if grep -q "^dtparam=pciex1_gen=3" "$CONFIG_FILE"; then
+        log_skip "PCIe Gen 3 already enabled"
+    else
+        echo "dtparam=pciex1_gen=3" >> "$CONFIG_FILE"
+        log_pass "PCIe Gen 3 enabled (Pi 5)"
+    fi
+
+    # Reduce GPU Memory (Server mode)
+    if grep -q "^gpu_mem=" "$CONFIG_FILE"; then
+        sed -i 's/^gpu_mem=.*/gpu_mem=32/' "$CONFIG_FILE"
+        log_pass "GPU memory reduced to 32MB"
+    else
+        echo "gpu_mem=32" >> "$CONFIG_FILE"
+        log_pass "GPU memory set to 32MB"
     fi
 
     # Disable Bluetooth & Audio (Saves power/interrupts)
@@ -242,6 +258,21 @@ optimize_storage() {
             log_pass "Fstrim timer enabled"
         fi
     fi
+
+    # 4. Tmpfs for temporary files
+    if grep -qE "\s/tmp\s+tmpfs" "$fstab_file"; then
+        log_skip "/tmp already in tmpfs"
+    else
+        echo "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,size=512M 0 0" >> "$fstab_file"
+        log_pass "/tmp moved to tmpfs"
+    fi
+
+    if grep -qE "\s/var/tmp\s+tmpfs" "$fstab_file"; then
+        log_skip "/var/tmp already in tmpfs"
+    else
+        echo "tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,size=256M 0 0" >> "$fstab_file"
+        log_pass "/var/tmp moved to tmpfs"
+    fi
 }
 
 ################################################################################
@@ -255,13 +286,12 @@ optimize_kernel() {
     local tmp_conf="/tmp/99-server-optimize.conf.tmp"
     
     cat > "$tmp_conf" << 'EOF'
-# Memory Management
-vm.swappiness=1
+# Memory Management (Tuned for 16k pages & ZRAM)
 vm.dirty_ratio=15
 vm.dirty_background_ratio=5
 vm.vfs_cache_pressure=50
 vm.overcommit_memory=1
-vm.min_free_kbytes=65536
+vm.min_free_kbytes=131072
 
 # Network Stack Optimizations
 net.core.somaxconn=1024
@@ -275,6 +305,10 @@ net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.ip_local_port_range=1024 65535
 net.ipv4.ip_forward=1
+
+# Docker Networking
+net.bridge.bridge-nf-call-iptables=1
+net.bridge.bridge-nf-call-ip6tables=1
 
 # TCP BBR
 net.core.default_qdisc=fq
@@ -303,6 +337,15 @@ EOF
         rm "$tmp_conf"
         log_skip "Kernel parameters already optimized"
     fi
+
+    # MGLRU Optimization (if enabled in kernel)
+    if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
+        echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || true
+        log_pass "MGLRU thrashing threshold optimized"
+    fi
+
+    # Apply all sysctl configs
+    sysctl --system >/dev/null 2>&1
 }
 
 ################################################################################
@@ -424,6 +467,7 @@ optimize_docker() {
       "live-restore": true,
       "userland-proxy": false,
       "no-new-privileges": true,
+      "exec-opts": ["native.cgroupdriver=systemd"],
       "features": { "buildkit": true },
       "default-ulimits": {
         "nofile": { "Name": "nofile", "Hard": 64000, "Soft": 64000 }
@@ -631,13 +675,6 @@ optimize_memory() {
         log_pass "dphys-swapfile service disabled and swap file removed"
     fi
 
-    # Check for and disable systemd-swap if present
-    if systemctl list-unit-files | grep -q systemd-swap; then
-        systemctl stop systemd-swap 2>/dev/null || true
-        systemctl disable systemd-swap 2>/dev/null || true
-        log_pass "systemd-swap service disabled"
-    fi
-
     # Disable runtime disk swap
     local other_swaps
     other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}' || true)
@@ -652,16 +689,108 @@ optimize_memory() {
         log_pass "Swap entries in fstab disabled"
     fi
 
-    # 2. ZRAM Setup (if available)
-    if [[ -f /etc/default/zramswap ]]; then
-        if grep -q "ALGO=zstd" /etc/default/zramswap && grep -q "PERCENT=60" /etc/default/zramswap; then
-            log_skip "ZRAM already configured (zstd, 60%)"
+    # 2. ZRAM Setup (systemd-zram-generator)
+    log_info "Configuring systemd-zram-generator..."
+    
+    # Remove zram-tools to avoid conflict
+    if command_exists apt-get && dpkg -l | grep -q "zram-tools"; then
+        log_info "Removing zram-tools conflict..."
+        apt-get purge -y zram-tools >/dev/null 2>&1 || true
+    fi
+
+    local zram_conf="/etc/systemd/zram-generator.conf"
+    local tmp_zram="/tmp/zram-generator.conf.tmp"
+
+    cat > "$tmp_zram" << 'EOF'
+[zram0]
+zram-size = min(ram / 2, 4096)
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+
+    if files_differ "$zram_conf" "$tmp_zram"; then
+        mv "$tmp_zram" "$zram_conf"
+        systemctl daemon-reload
+        systemctl start /dev/zram0 2>/dev/null || true
+        log_pass "systemd-zram-generator configured (zstd, 50% RAM up to 4G)"
+    else
+        rm "$tmp_zram"
+        log_skip "systemd-zram-generator already configured"
+    fi
+
+    # Ensure high swappiness for ZRAM
+    local swappiness_file="/etc/sysctl.d/98-zram-swappiness.conf"
+    if [[ ! -f "$swappiness_file" ]] || ! grep -q "vm.swappiness=150" "$swappiness_file"; then
+        echo "vm.swappiness=150" > "$swappiness_file"
+        sysctl -w vm.swappiness=150 >/dev/null 2>&1
+        log_pass "Swappiness set to 150 (ZRAM optimization)"
+    else
+        log_skip "Swappiness already optimized for ZRAM"
+    fi
+
+    # 3. Transparent Hugepages (THP) for Valkey/Databases
+    # 16k page size systems benefit from 'madvise' to prevent fragmentation
+    log_info "Optimizing Transparent Hugepages..."
+    if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
+        echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled
+        log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
+    fi
+
+    # 4. Continuous Flash Media Protection (Hourly Swap Enforcer)
+    local enforcer_script="/usr/local/bin/disk-swap-enforcer"
+    local enforcer_service="/etc/systemd/system/disk-swap-enforcer.service"
+    local enforcer_timer="/etc/systemd/system/disk-swap-enforcer.timer"
+
+    if [[ ! -f "$enforcer_script" ]]; then
+        log_info "Setting up continuous disk swap enforcer..."
+        cat > "$enforcer_script" << 'EOF'
+#!/bin/bash
+# Checks if any disk-based swap has been enabled and turns it off to protect flash media.
+# Ignores zram which is RAM-based.
+bad_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}' || true)
+if [[ -n "$bad_swaps" ]]; then
+    for s in $bad_swaps; do
+        swapoff "$s" 2>/dev/null || true
+        logger -p warning -t disk-swap-enforcer "Disabled unauthorized disk swap: $s to protect flash media."
+    done
+fi
+EOF
+        chmod +x "$enforcer_script"
+    fi
+
+    if [[ ! -f "$enforcer_service" ]]; then
+        cat > "$enforcer_service" << 'EOF'
+[Unit]
+Description=Enforce Flash Media Protection (Disable Disk Swap)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disk-swap-enforcer
+EOF
+    fi
+
+    if [[ ! -f "$enforcer_timer" ]]; then
+        cat > "$enforcer_timer" << 'EOF'
+[Unit]
+Description=Run Disk Swap Enforcer Hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload
+        if systemctl enable --now disk-swap-enforcer.timer 2>/dev/null; then
+            log_pass "Hourly disk swap enforcer configured and activated"
         else
-            sed -i 's/ALGO=.*/ALGO=zstd/' /etc/default/zramswap
-            sed -i 's/PERCENT=.*/PERCENT=60/' /etc/default/zramswap
-            systemctl restart zramswap 2>/dev/null || true
-            log_pass "ZRAM tuned: zstd, 60%"
+            log_warn "Failed to enable disk-swap-enforcer timer"
         fi
+    else
+        log_skip "Disk swap enforcer already configured"
     fi
 }
 
@@ -823,8 +952,10 @@ system_maintenance() {
         ufw allow in on docker0 >/dev/null
         # Fix for n8n <-> Ollama connection timeout (Allow wg-easy subnet to Ollama)
         ufw allow from 10.8.1.0/24 to any port 11434 proto tcp >/dev/null
+        # Disable logging to save flash
+        ufw logging off >/dev/null
         echo "y" | ufw enable >/dev/null
-        log_pass "Firewall (UFW) configured and enabled"
+        log_pass "Firewall (UFW) configured (logging disabled)"
     fi
 
     log_info "Removing documentation to save space..."

@@ -21,7 +21,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.2.1"
+SCRIPT_VERSION="4.3.0"
 # shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
 # CONFIG_FILE="/boot/firmware/config.txt" # Unused in setup.sh directly, used in optimize.sh
@@ -115,7 +115,7 @@ system_core() {
     local packages=(
         "ca-certificates" "curl" "gnupg" "git" "jq" "bc" 
         "usbutils" "util-linux" "watchdog" "e2fsprogs" 
-        "smartmontools" "cpufrequtils" "zram-tools" "fail2ban" "ufw"
+        "smartmontools" "cpufrequtils" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
         "busybox-syslogd"
     )
