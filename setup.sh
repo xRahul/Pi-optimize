@@ -181,7 +181,19 @@ nodejs_tooling() {
     log_section "NODE.JS & TOOLING"
     
     if ! command_exists node; then
-        curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+        log_info "Installing Node.js LTS via NodeSource..."
+        # NodeSource manual installation (modern way)
+        wait_for_apt_lock
+        apt-get update
+        apt-get install -y ca-certificates curl gnupg
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+        
+        # Determine Major version for LTS (Node 22 is current LTS as of late 2024/2025, but 20 is solid)
+        local node_major="20"
+        echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
+        
+        apt-get update
         apt-get install -y nodejs
     fi
     log_pass "Node.js: $(node -v)"

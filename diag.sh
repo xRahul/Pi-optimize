@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Raspberry Pi 5 Diagnostic Tool - ULTIMATE EDITION v4.2.0
+# Raspberry Pi 5 Diagnostic Tool - ULTIMATE EDITION v4.3.0
 # Target: Debian Trixie/Bookworm (aarch64) on Raspberry Pi 5
 # Features: Pi 5 Hardware, Docker, USB Storage, System Health
 # License: MIT (Copyright 2025 Rahul)

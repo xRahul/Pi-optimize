@@ -1,99 +1,105 @@
-# 🥧 Raspberry Pi Home Server Optimization Suite (v4.2.0)
+# 🥧 Raspberry Pi Home Server Optimization Suite (v4.3.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Pi 5](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red.svg)]()
 [![OS: Debian Trixie](https://img.shields.io/badge/OS-Debian%20Trixie-blue.svg)]()
 
-A "Pro Edition" automation suite for Raspberry Pi 5. This project transforms a fresh Raspberry Pi OS Lite installation into a hardened, high-performance, and flash-optimized Docker host.
+A "Pro Edition" automation suite designed exclusively for the **Raspberry Pi 5** running Debian Trixie (13). This suite transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host, perfect for demanding self-hosted applications like Immich, n8n, and local LLMs.
 
 ---
 
-## 🚀 The "Ultimate Edition" Upgrade (v4.x)
+## 🚀 The "Ultimate Edition" (v4.3.0)
 
-The suite has been completely rewritten for **Debian Trixie (13)** and **Raspberry Pi 5**, moving from simple scripts to a robust automation framework.
+This suite is not just a collection of scripts; it's a comprehensive system state management tool. It prioritizes **Flash Longevity**, **IO Performance**, and **System Stability**.
 
-### Key Improvements:
-*   **Idempotency**: All scripts can be run multiple times safely.
-*   **Redundancy**: Triple-layer checks for critical configurations (Docker, USB, Network).
-*   **Security First**: Integrated Firewall (UFW) management and Kernel hardening.
-*   **Reliability**: Lock files prevent parallel runs; trap handlers manage errors.
-*   **Pro Diagnostics**: Health scoring system with SMART disk monitoring.
-
----
-
-## 🧠 Technical Deep Dive
-
-### 1. Performance & Thermals
-*   **Aggressive Cooling**: Fan starts at 35°C (Pi 5 specific) to prevent thermal jitter.
-*   **CPU Performance**: Sets persistent `performance` governor for maximum responsiveness.
-*   **I/O Scheduling**: Forces **BFQ scheduler** for USB/SD storage to handle random I/O (Docker) better.
-
-### 2. Flash Longevity & Storage
-*   **Swapoff**: Permanently disables disk-based swap to save storage wear.
-*   **ZRAM Only**: Uses compressed RAM (`zstd`) for emergency memory needs.
-*   **USB Optimization**: Disables USB autosuspend and increases `min_free_kbytes` for stability on flash drives.
-*   **Write Minimization**: Implements `noatime`, `busybox-syslogd` (RAM logging), and volatile journald.
-
-### 3. Network & Docker
-*   **Google BBR**: Enables BBR congestion control for superior throughput.
-*   **Docker Hardening**: Configures `no-new-privileges`, log rotation, and `live-restore`.
-*   **Automated Mounts**: Robust UUID-based mounting for USB storage.
+### Key Highlights:
+*   **Triple-Threat Flash Protection**: Extreme measures to prevent SD Card/USB Flash wear.
+*   **RPi 5 Native Tuning**: Leverages Pi 5 specific features like PCIe Gen 3 and advanced thermal management.
+*   **Idempotent Execution**: Safely run any script multiple times; it only applies what's missing.
+*   **Production Hardening**: Includes UFW firewall, Fail2Ban, and Kernel-level security tweaks.
+*   **Local AI Ready**: Optimized support for Ollama (Local LLMs) with CPU-specific tuning.
 
 ---
 
-## 📋 Quick Start
+## 🧠 Technical Architecture
 
-### Prerequisites
-1.  **Hardware**: Raspberry Pi 5.
-2.  **OS**: Raspberry Pi OS Lite (64-bit).
-3.  **Storage**: High-speed USB 3.0 Flash Drive or SSD (Running OS from USB is recommended).
+### 🛡️ Flash Media Protection (The "Triple-Threat")
+Flash storage (SD/USB) is the #1 failure point for Pi servers. We mitigate this with three layers:
+1.  **Volatile Logging**: `busybox-syslogd` and `systemd-journald` are configured for **RAM-only storage**, drastically reducing constant disk writes.
+2.  **ZRAM Swap**: Disk-based swap is purged. We use ZRAM with `zstd` compression and `vm.swappiness=150` to ensure memory pressure is handled in-RAM.
+3.  **The Enforcer**: A systemd timer (`disk-swap-enforcer`) runs hourly to ensure no rogue services (like `dphys-swapfile`) have re-enabled disk swap.
 
-### Installation
+### ⚡ Performance & IO Tuning
+*   **CPU Governor**: Persistent `performance` mode for maximum throughput.
+*   **IO Scheduler**: Forces **BFQ** for USB drives, ensuring Docker containers aren't blocked by background writes.
+*   **Network Stack**: Enables **TCP BBR** congestion control and optimizes sysctl for 16k page sizes (Pi 5 default).
+*   **Hardware Overclocking (Safe)**: Enables **PCIe Gen 3** and an aggressive fan curve (starts at 35°C) to prevent thermal throttling.
 
-```bash
-# 1. Clone & Enter
-git clone https://github.com/xRahul/Pi-optimize.git
-cd Pi-optimize
-
-# 2. Setup (The "One-Shot" Command)
-# Installs dependencies, Docker, Node.js, mounts USB, and runs optimize.sh automatically.
-# Detects USB boot and skips existing packages.
-sudo ./setup.sh
-
-# 3. Verify
-sudo ./diag.sh
-```
+### ⛓️ System Resilience
+*   **`startup-mounts.service`**: A custom "one-shot" service that ensures all USB filesystems are successfully mounted *before* the Docker daemon starts, preventing container startup failures.
+*   **`tailscale-fix.service`**: Solves a common RPi 5 race condition where Tailscale starts before the network is fully up, leading to routing failures.
 
 ---
 
 ## 🔧 Script Breakdown
 
 ### 🛠 `setup.sh` (The Provisioner)
-*   **Smart Install**: Checks for existing packages to avoid redundant operations.
-*   **USB Detect**: Warns if not booting from USB for optimal performance.
-*   **Ollama AI**: (Optional) Installs and optimizes Ollama for local LLM inference on Pi 5.
-*   **Dependencies**: Installs `fail2ban`, `ufw`, `rng-tools5`, `busybox-syslogd`, and more.
-*   **Integration**: Automatically invokes `optimize.sh`.
+The entry point for a new system. It handles:
+*   **Bulk Dependency Management**: Installs only what's needed (Docker, Node.js 20+, Git, etc.).
+*   **Modern Node.js**: Uses the latest NodeSource GPG-signed repository method.
+*   **Ollama Integration**: (Optional) Installs Ollama and configures it to store models on USB to save flash space.
+*   **Systemd Integration**: Configures all custom services and timers.
 
 ### ⚡ `optimize.sh` (The Tuner)
-*   **Swap**: Removes `dphys-swapfile` and sets `vm.swappiness=1` for minimal swapping.
-*   **Kernel**: Hardens `sysctl` settings, enables BBR, and tunes memory for USB I/O.
-*   **Network Repair**: Auto-detects Tailscale and installs a boot-time connectivity fix.
-*   **Maintenance**: Prunes Docker, clears documentation, and configures the firewall.
+The heart of the suite. It applies:
+*   **Kernel Hardening**: Protects against common network attacks via `sysctl`.
+*   **ZRAM Optimization**: Configures `systemd-zram-generator` with optimal Pi 5 settings.
+*   **Docker Daemon Tuning**: Enables `live-restore`, `json-file` log rotation, and optimized data-root paths.
+*   **Security**: Configures UFW with specific rules for internal Docker networking and n8n/Ollama connectivity.
 
 ### 🩺 `diag.sh` (The Auditor)
-*   **Health Score**: Provides a percentage-based readiness score.
-*   **Advanced Checks**: Zombie processes, failed systemd units, SMART status, and Tailscale connectivity.
+A senior engineer in a script. It checks:
+*   **Health Score**: A percentage-based assessment of system readiness.
+*   **SMART Status**: Audits the health of attached USB drives.
+*   **PMIC Status**: Checks Pi 5 Power Management IC for power supply issues.
+*   **Connectivity**: Verifies internal container-to-host networking.
+
+---
+
+## 📋 Quick Start
+
+### Prerequisites
+*   **OS**: Raspberry Pi OS Lite (64-bit) / Debian Trixie.
+*   **User**: Must be run by a user with `sudo` privileges.
+*   **Storage**: A USB 3.0 SSD is highly recommended for the OS and Docker data.
+
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/xRahul/Pi-optimize.git
+cd Pi-optimize
+
+# 2. Run the Setup (Requires Sudo)
+# This will provision the system and automatically run optimize.sh
+sudo ./setup.sh
+
+# 3. Verify System Health
+sudo ./diag.sh
+```
 
 ---
 
 ## 🔍 Troubleshooting
 
-### Docker is not using the USB drive?
-Ensure your USB drive is formatted as **ext4** or **btrfs**. FAT32/exFAT are not recommended for Docker storage due to permission issues, though the scripts attempt to mitigate this.
+**Q: Why is swappiness set to 150?**  
+A: With ZRAM, a high swappiness value is actually better. It encourages the kernel to move idle pages into compressed RAM early, leaving more "real" RAM for active processes.
 
-### How to check logs?
-Optimization logs are stored at `/var/log/rpi-optimize.log`.
+**Q: My USB drive didn't mount automatically?**  
+A: The script attempts to find the largest non-system partition and add it to `/etc/fstab`. If you have a complex setup, you may need to manually adjust `/etc/fstab`.
+
+**Q: How do I see the logs?**  
+A: All optimization logs are at `/var/log/rpi-optimize.log`. Diagnostic logs are at `/var/log/rpi-diag.log`.
 
 ---
 
