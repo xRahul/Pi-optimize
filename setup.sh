@@ -117,7 +117,7 @@ system_core() {
         "usbutils" "util-linux" "watchdog" "e2fsprogs" 
         "smartmontools" "cpufrequtils" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
-        "busybox-syslogd"
+        "busybox-syslogd" "bats"
     )
     
     # Optimize: Bulk check installed packages
@@ -189,8 +189,8 @@ nodejs_tooling() {
         mkdir -p /etc/apt/keyrings
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
         
-        # Determine Major version for LTS (Node 22 is current LTS as of late 2024/2025, but 20 is solid)
-        local node_major="20"
+        # Node 22 (Jod) is the current LTS as of 2025/2026
+        local node_major="22"
         echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
         
         apt-get update
@@ -336,7 +336,48 @@ EOF
 }
 
 ################################################################################
-# 6. USB & Optimization
+# 6. Python Tooling (uv)
+################################################################################
+
+install_uv_tooling() {
+    log_section "PYTHON TOOLING (uv)"
+
+    local target_user
+    target_user=$(get_target_user)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    local uv_bin="${target_home}/.local/bin/uv"
+
+    if [[ -f "$uv_bin" ]]; then
+        local uv_ver
+        uv_ver=$(sudo -u "$target_user" "$uv_bin" self version 2>/dev/null || echo "unknown")
+        log_skip "uv already installed: ${uv_ver}"
+        return
+    fi
+
+    if [[ "$target_user" == "root" ]]; then
+        log_warn "Running as root without SUDO_USER set — skipping uv install (requires a non-root user home)"
+        return
+    fi
+
+    log_info "Installing uv Python tool manager for user $target_user..."
+    if sudo -u "$target_user" bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'; then
+        log_pass "uv installed for $target_user"
+        # Add ~/.local/bin to PATH if not already present
+        if ! grep -q '.local/bin' "${target_home}/.bashrc"; then
+            # shellcheck disable=SC2016
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${target_home}/.bashrc"
+            log_pass ".local/bin added to PATH in .bashrc"
+        else
+            log_skip ".local/bin already in .bashrc PATH"
+        fi
+    else
+        log_warn "uv installation failed — MCP Python servers may not work"
+    fi
+}
+
+################################################################################
+# 7. USB & Optimization
 ################################################################################
 
 usb_optimization() {
@@ -451,6 +492,7 @@ main() {
     system_core
     docker_suite
     nodejs_tooling
+    install_uv_tooling
     usb_optimization
     install_ollama
     

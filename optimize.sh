@@ -129,14 +129,21 @@ EOF
     fi
 
     # Disable Bluetooth & Audio (Saves power/interrupts)
-    for opt in "dtoverlay=disable-bt" "dtparam=audio=off"; do
-        if grep -q "^$opt" "$CONFIG_FILE"; then
-            log_skip "$opt already set"
-        else
-            echo "$opt" >> "$CONFIG_FILE"
-            log_pass "$opt enabled"
-        fi
-    done
+    if grep -q "^dtoverlay=disable-bt" "$CONFIG_FILE"; then
+        log_skip "dtoverlay=disable-bt already set"
+    else
+        echo "dtoverlay=disable-bt" >> "$CONFIG_FILE"
+        log_pass "dtoverlay=disable-bt enabled"
+    fi
+
+    if grep -q "^dtparam=audio=off" "$CONFIG_FILE"; then
+        log_skip "dtparam=audio=off already set"
+    else
+        # Comment out any existing audio=on to avoid conflicting entries
+        sed -i 's/^dtparam=audio=on/# dtparam=audio=on  # Disabled by optimize.sh/' "$CONFIG_FILE"
+        echo "dtparam=audio=off" >> "$CONFIG_FILE"
+        log_pass "dtparam=audio=off enabled (existing audio=on commented out)"
+    fi
 
     # Hardware Watchdog
     if grep -q "^dtparam=watchdog=on" "$CONFIG_FILE"; then
@@ -168,7 +175,6 @@ EOF
 ################################################################################
 # 2. CPU & Performance
 ################################################################################
-
 optimize_cpu() {
     log_section "CPU & PERFORMANCE"
     
@@ -180,24 +186,38 @@ optimize_cpu() {
     if [[ "$current_gov" == "performance" ]]; then
         log_skip "CPU governor already set to performance"
     else
-        # Set governor to performance
-        if command_exists cpufreq-set; then
-            cpufreq-set -g performance || log_warn "Failed to set performance governor"
-            log_pass "CPU governor set to performance"
-        elif [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1
-            log_pass "CPU governor set to performance (sysfs)"
+        # Set governor to performance immediately (runtime)
+        if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1
+            log_pass "CPU governor set to performance (runtime)"
         fi
     fi
 
-    # Persistent Governor via cpufrequtils
-    if [[ -f /etc/default/cpufrequtils ]]; then
-        if ! grep -q 'GOVERNOR="performance"' /etc/default/cpufrequtils; then
-            echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
-            log_pass "Persistent CPU governor: performance"
-        else
-            log_skip "Persistent CPU governor already configured"
-        fi
+    # Persist governor across reboots via systemd service
+    # NOTE: /etc/default/cpufrequtils is NOT used here because the cpufrequtils
+    # init.d service does not exist on modern Debian Trixie with the cpufreq-dt driver.
+    local gov_service="/etc/systemd/system/cpu-governor.service"
+    if [[ -f "$gov_service" ]] && grep -q "performance" "$gov_service"; then
+        log_skip "CPU governor persistence already configured"
+    else
+        cat > "$gov_service" << 'EOF'
+[Unit]
+Description=Set CPU Governor to Performance Mode
+After=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        # shellcheck disable=SC2015
+        systemctl enable --now cpu-governor.service > /dev/null 2>&1 \
+            && log_pass "CPU governor persistence configured (cpu-governor.service)" \
+            || log_warn "Failed to enable cpu-governor.service"
     fi
 }
 
@@ -344,8 +364,19 @@ EOF
         log_pass "MGLRU thrashing threshold optimized"
     fi
 
+    # Ensure br_netfilter loads at boot (required for Docker bridge sysctl settings)
+    # Without this, net.bridge.bridge-nf-call-iptables silently fails on fresh boot
+    local netfilter_conf="/etc/modules-load.d/docker-netfilter.conf"
+    if [[ ! -f "$netfilter_conf" ]]; then
+        echo "br_netfilter" > "$netfilter_conf"
+        modprobe br_netfilter 2>/dev/null || true
+        log_pass "br_netfilter configured to load at boot (Docker bridge networking)"
+    else
+        log_skip "br_netfilter already configured"
+    fi
+
     # Apply all sysctl configs
-    sysctl --system >/dev/null 2>&1
+    sysctl --system > /dev/null 2>&1
 }
 
 ################################################################################
@@ -625,9 +656,10 @@ fix_tailscale_race() {
     fi
 
     local service_file="/etc/systemd/system/tailscale-fix.service"
-    
-    # We create a service that waits for valid internet connection then restarts tailscale
-    cat > "$service_file" << 'EOF'
+    local tmp_service="/tmp/tailscale-fix.service.tmp"
+
+    # Write desired state to temp file first, then compare for idempotency
+    cat > "$tmp_service" << 'EOF'
 [Unit]
 Description=Fix Tailscale Connectivity on Boot
 After=docker.service network-online.target
@@ -645,12 +677,20 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    if systemctl enable tailscale-fix.service 2>/dev/null; then
-        log_pass "Tailscale boot fix enabled"
+    if files_differ "$service_file" "$tmp_service"; then
+        mv "$tmp_service" "$service_file"
+        systemctl daemon-reload
+        log_pass "Tailscale boot fix service updated"
     else
-        log_warn "Failed to enable Tailscale boot fix"
+        rm "$tmp_service"
+        log_skip "Tailscale boot fix already configured"
     fi
+
+    # Ensure it's enabled regardless (idempotent)
+    # shellcheck disable=SC2015
+    systemctl enable tailscale-fix.service 2>/dev/null \
+        && log_pass "Tailscale boot fix enabled" \
+        || log_warn "Failed to enable Tailscale boot fix"
 }
 
 ################################################################################
@@ -681,6 +721,14 @@ optimize_memory() {
     if [[ -n "$other_swaps" ]]; then
         echo "$other_swaps" | xargs -r swapoff 2>/dev/null || true
         log_pass "Active disk swap(s) disabled"
+    fi
+
+    # Explicitly remove any orphaned /var/swap file (may persist even if dphys-swapfile is gone)
+    # This reclaims the 2GB the default dphys-swapfile creates on the OS flash drive
+    if [[ -f /var/swap ]]; then
+        swapoff /var/swap 2>/dev/null || true
+        rm -f /var/swap
+        log_pass "Orphaned /var/swap file removed (flash space reclaimed)"
     fi
 
     # Disable fstab swap entries
@@ -932,7 +980,41 @@ EOF
 }
 
 ################################################################################
-# 8. Maintenance & Security
+# 8. SMART Daemon Configuration
+################################################################################
+
+optimize_smartd() {
+    log_section "SMART DAEMON (smartd)"
+
+    if ! command_exists smartd; then
+        log_skip "smartmontools not installed"
+        return
+    fi
+
+    local smartd_defaults="/etc/default/smartmontools"
+    if [[ ! -f "$smartd_defaults" ]]; then
+        log_warn "$smartd_defaults not found - skipping smartd configuration"
+        return
+    fi
+
+    # Use -q never so smartd doesn't exit when no SMART-capable devices are found.
+    # USB bridges (e.g. SanDisk USB enclosures) report SCSI rather than ATA SMART,
+    # causing smartd to exit with status 17 ("No devices to monitor") which makes
+    # the smartmontools.service fail at boot.
+    if grep -q "^smartd_opts" "$smartd_defaults"; then
+        log_skip "smartd_opts already configured"
+    else
+        backup_file "$smartd_defaults"
+        sed -i 's/^#smartd_opts=.*/smartd_opts="-q never"/' "$smartd_defaults"
+        # shellcheck disable=SC2015
+        systemctl restart smartmontools 2>/dev/null \
+            && log_pass "smartd configured with -q never (survives USB SMART limitations)" \
+            || log_warn "smartd restart failed - will apply on next boot"
+    fi
+}
+
+################################################################################
+# 9. Maintenance & Security
 ################################################################################
 
 system_maintenance() {
@@ -961,6 +1043,35 @@ system_maintenance() {
     log_info "Removing documentation to save space..."
     rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* 2>/dev/null || true
     log_pass "Documentation cleared"
+
+    # Clean user-level caches that accumulate on the OS flash drive
+    local target_user
+    target_user="${SUDO_USER:-}"
+    [[ -z "$target_user" ]] && target_user=$(id -nu 1000 2>/dev/null || echo "")
+
+    if [[ -n "$target_user" && "$target_user" != "root" ]]; then
+        local target_home
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+
+        # Clean uv cache (Python tool manager for MCP servers)
+        local uv_bin="${target_home}/.local/bin/uv"
+        if [[ -f "$uv_bin" ]]; then
+            log_info "Cleaning uv cache..."
+            # shellcheck disable=SC2015
+            sudo -u "$target_user" "$uv_bin" cache clean --quiet 2>/dev/null \
+                && log_pass "uv cache cleaned" \
+                || log_warn "uv cache clean failed"
+        fi
+
+        # Clean npm cache (prune stale packages, not full wipe to preserve build speed)
+        if command_exists npm; then
+            log_info "Cleaning npm cache..."
+            # shellcheck disable=SC2015
+            sudo -u "$target_user" npm cache verify --quiet 2>/dev/null \
+                && log_pass "npm cache verified and pruned" \
+                || log_warn "npm cache clean failed"
+        fi
+    fi
 }
 
 ################################################################################
@@ -1030,6 +1141,7 @@ main() {
     setup_docker_compose_restart
     optimize_memory
     optimize_logs
+    optimize_smartd
     optimize_ollama_service
     system_maintenance
     

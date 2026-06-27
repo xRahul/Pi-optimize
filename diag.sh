@@ -316,7 +316,25 @@ check_resources() {
     else
         report_info "/var/tmp: Not in tmpfs (Standard)"
     fi
-    }
+
+    # CPU Governor
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        local gov
+        gov=$(< /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+        if [[ "$gov" == "performance" ]]; then
+            report_pass "CPU Governor: performance"
+        else
+            report_warn "CPU Governor: $gov (not performance)" "Run optimize.sh to fix."
+        fi
+    fi
+
+    # Orphaned /var/swap
+    if [[ -f /var/swap ]]; then
+        local swap_size
+        swap_size=$(du -sh /var/swap 2>/dev/null | cut -f1)
+        report_warn "Orphaned /var/swap ($swap_size) on flash" "Run optimize.sh to remove it."
+    fi
+}
 
 
 ################################################################################
@@ -387,13 +405,22 @@ check_storage() {
     if command_exists smartctl; then
         local disk_dev
         disk_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null | sed 's/[0-9]*$//')
-        if [ -b "$disk_dev" ]; then
-            local smart_status
-            smart_status=$(smartctl -H "$disk_dev" 2>/dev/null | grep -i "test result" | cut -d: -f2 | xargs)
-            if [[ "$smart_status" == "PASSED" ]]; then
-                report_pass "SMART Health: PASSED ($disk_dev)"
+        if [[ -b "$disk_dev" ]]; then
+            local smart_status=""
+            # Try standard, then sat, then scsi
+            for dtype in "" "sat" "scsi"; do
+                local dflag=""
+                [[ -n "$dtype" ]] && dflag="-d $dtype"
+                smart_status=$(smartctl $dflag -H "$disk_dev" 2>/dev/null | \
+                    grep -iE "test result|Health Status" | head -1 | \
+                    grep -ioE "(PASSED|FAILED|OK)")
+                [[ -n "$smart_status" ]] && break
+            done
+            
+            if [[ "$smart_status" == "PASSED" || "$smart_status" == "OK" ]]; then
+                report_pass "SMART Health: $smart_status ($disk_dev)"
             elif [[ -z "$smart_status" ]]; then
-                 report_info "SMART Health: Unavailable/Unsupported for $disk_dev"
+                report_info "SMART Health: Unsupported on this drive/bridge ($disk_dev)"
             else
                 report_fail "SMART Health: $smart_status ($disk_dev)" "Drive may be failing!"
             fi
@@ -613,12 +640,48 @@ check_system_services() {
     fi
 
     # Failed Units
-    local failed_units
-    failed_units=$(systemctl list-units --state=failed --no-legend | wc -l)
-    if [ "$failed_units" -eq 0 ]; then
+    local failed_units_list
+    failed_units_list=$(systemctl list-units --state=failed --no-legend 2>/dev/null)
+    local failed_count
+    failed_count=$(echo "$failed_units_list" | grep -c '.' || echo 0)
+    if [[ "$failed_count" -eq 0 ]]; then
         report_pass "Systemd: No failed units"
     else
-        report_fail "Systemd: $failed_units failed units detected" "Check 'systemctl --failed' for details."
+        report_fail "Systemd: $failed_count failed unit(s)" "Run 'systemctl --failed' for details."
+        # Print each failed unit name
+        while IFS= read -r unit_line; do
+            [[ -n "$unit_line" ]] && echo -e "${RED}  → $unit_line${NC}"
+        done <<< "$failed_units_list"
+    fi
+
+    # Toolchain Audit (uv and agy)
+    local target_user
+    target_user="${SUDO_USER:-}"
+    [[ -z "$target_user" ]] && target_user=$(id -nu 1000 2>/dev/null || echo "")
+    
+    if [[ -n "$target_user" ]]; then
+        local target_home
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+        
+        # uv check
+        local uv_bin="${target_home}/.local/bin/uv"
+        if [[ -f "$uv_bin" ]]; then
+            local uv_ver
+            uv_ver=$(sudo -u "$target_user" "$uv_bin" self version 2>/dev/null | awk '{print $2}')
+            report_pass "Tooling: uv (Python) $uv_ver"
+        else
+            report_warn "Tooling: uv not installed" "Run setup.sh to install."
+        fi
+
+        # agy (antigravity-cli) check
+        local agy_bin="${target_home}/.local/bin/agy"
+        if [[ -f "$agy_bin" ]]; then
+            local agy_ver
+            agy_ver=$(sudo -u "$target_user" "$agy_bin" --version 2>/dev/null || echo "unknown")
+            report_info "Tooling: Antigravity CLI (agy) v$agy_ver"
+        else
+            report_info "Tooling: Antigravity CLI (agy) not installed"
+        fi
     fi
 }
 
