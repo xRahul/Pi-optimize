@@ -303,7 +303,8 @@ optimize_kernel() {
     log_section "KERNEL TUNING"
     
     local sysctl_conf="/etc/sysctl.d/99-server-optimize.conf"
-    local tmp_conf="/tmp/99-server-optimize.conf.tmp"
+    local tmp_conf
+    tmp_conf=$(mktemp)
     
     cat > "$tmp_conf" << 'EOF'
 # Memory Management (Tuned for 16k pages & ZRAM)
@@ -656,7 +657,8 @@ fix_tailscale_race() {
     fi
 
     local service_file="/etc/systemd/system/tailscale-fix.service"
-    local tmp_service="/tmp/tailscale-fix.service.tmp"
+    local tmp_service
+    tmp_service=$(mktemp)
 
     # Write desired state to temp file first, then compare for idempotency
     cat > "$tmp_service" << 'EOF'
@@ -747,7 +749,8 @@ optimize_memory() {
     fi
 
     local zram_conf="/etc/systemd/zram-generator.conf"
-    local tmp_zram="/tmp/zram-generator.conf.tmp"
+    local tmp_zram
+    tmp_zram=$(mktemp)
 
     cat > "$tmp_zram" << 'EOF'
 [zram0]
@@ -852,7 +855,8 @@ optimize_logs() {
     # Journald volatile storage
     local journal_conf_dir="/etc/systemd/journald.conf.d"
     local journal_conf="${journal_conf_dir}/optimize.conf"
-    local tmp_conf="/tmp/journald-optimize.conf.tmp"
+    local tmp_conf
+    tmp_conf=$(mktemp)
     
     mkdir -p "$journal_conf_dir"
     cat > "$tmp_conf" << 'EOF'

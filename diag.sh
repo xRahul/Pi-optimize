@@ -642,11 +642,11 @@ check_system_services() {
     # Failed Units
     local failed_units_list
     failed_units_list=$(systemctl list-units --state=failed --no-legend 2>/dev/null)
-    local failed_count
-    failed_count=$(echo "$failed_units_list" | grep -c '.' || echo 0)
-    if [[ "$failed_count" -eq 0 ]]; then
+    if [[ -z "$failed_units_list" ]]; then
         report_pass "Systemd: No failed units"
     else
+        local failed_count
+        failed_count=$(echo "$failed_units_list" | wc -l)
         report_fail "Systemd: $failed_count failed unit(s)" "Run 'systemctl --failed' for details."
         # Print each failed unit name
         while IFS= read -r unit_line; do
