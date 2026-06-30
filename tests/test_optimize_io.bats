@@ -125,3 +125,28 @@ teardown() {
     run grep -c "noatime" "$FSTAB_FILE"
     [ "$output" -eq 1 ]
 }
+
+@test "optimize_storage adds commit=10 to root if ext4 and missing" {
+    # Prepare fstab
+    echo "UUID=1234-5678 / ext4 defaults,noatime 0 1" > "$FSTAB_FILE"
+
+    run optimize_storage
+
+    echo "$output"
+    [[ "$output" =~ "Adding commit=10 to root filesystem" ]]
+    run cat "$FSTAB_FILE"
+    [[ "$output" =~ "defaults,noatime,commit=10" ]]
+}
+
+@test "optimize_storage skips commit=10 if already present" {
+    # Prepare fstab
+    echo "UUID=1234-5678 / ext4 defaults,noatime,commit=10 0 1" > "$FSTAB_FILE"
+
+    run optimize_storage
+
+    echo "$output"
+    [[ "$output" =~ "Root filesystem already has commit configured" ]]
+    # Ensure it wasn't added twice
+    run grep -c "commit=" "$FSTAB_FILE"
+    [ "$output" -eq 1 ]
+}

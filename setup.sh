@@ -95,8 +95,9 @@ preflight_checks() {
     
     if [[ "$boot_tran" == "usb" ]]; then
         log_pass "Boot Drive: USB Flash/SSD detected"
+        log_info "Flash wear-level optimizations (RAM logging, delayed writebacks, adjusted commit intervals) will be applied."
     else
-        log_warn "Boot Drive: ${boot_tran:-Unknown} (Not USB). Ensure you are booting from your flash drive for best performance."
+        log_warn "Boot Drive: ${boot_tran:-Unknown} (Not USB). Flash wear-level optimizations will still be configured for media safety."
     fi
 }
 

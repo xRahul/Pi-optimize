@@ -231,7 +231,7 @@ optimize_storage() {
     local fstab_file="${FSTAB_FILE:-/etc/fstab}"
     backup_file "$fstab_file"
 
-    # 1. Root noatime optimization
+    # 1. Root noatime optimization & commit=10 for ext4 flash wear protection
     if grep -qE "^[^#].*\s/\s.*noatime" "$fstab_file"; then
         log_skip "Root filesystem already has noatime"
     else
@@ -240,6 +240,18 @@ optimize_storage() {
         # Matches: (Start) (device) (mountpoint /) (fs) (options) (dump) (pass)
         sed -i -E 's/^([^#]\S+\s+\/\s+\S+\s+)(\S+)/\1\2,noatime/' "$fstab_file"
         log_pass "Root filesystem optimized: noatime"
+    fi
+
+    # 1b. Root commit option for ext4 to reduce writeback latency (if root is ext4)
+    # Check if root filesystem is ext4 in fstab
+    if grep -qE "^[^#].*\s/\s+ext4" "$fstab_file"; then
+        if grep -qE "^[^#].*\s/\s+ext4\s+\S*commit=" "$fstab_file"; then
+            log_skip "Root filesystem already has commit configured"
+        else
+            log_info "Adding commit=10 to root filesystem..."
+            sed -i -E 's/^([^#]\S+\s+\/\s+ext4\s+)(\S+)/\1\2,commit=10/' "$fstab_file"
+            log_pass "Root filesystem optimized: commit=10"
+        fi
     fi
 
     # 2. I/O Scheduler (BFQ for USB/SD)
@@ -313,6 +325,8 @@ vm.dirty_background_ratio=5
 vm.vfs_cache_pressure=50
 vm.overcommit_memory=1
 vm.min_free_kbytes=131072
+vm.dirty_writeback_centisecs=1000
+vm.dirty_expire_centisecs=6000
 
 # Network Stack Optimizations
 net.core.somaxconn=1024

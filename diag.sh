@@ -276,6 +276,21 @@ check_resources() {
         fi
     fi
 
+    # Flash writeback dirty page configurations
+    local dirty_writeback dirty_expire
+    dirty_writeback=$(sysctl -n vm.dirty_writeback_centisecs 2>/dev/null || echo "500")
+    dirty_expire=$(sysctl -n vm.dirty_expire_centisecs 2>/dev/null || echo "3000")
+    if [ "$dirty_writeback" -ge 1000 ]; then
+        report_pass "vm.dirty_writeback_centisecs: $dirty_writeback (Optimal for Flash write delay)"
+    else
+        report_warn "vm.dirty_writeback_centisecs: $dirty_writeback is default (5s)" "Run optimize.sh to increase dirty writeback delay."
+    fi
+    if [ "$dirty_expire" -ge 6000 ]; then
+        report_pass "vm.dirty_expire_centisecs: $dirty_expire (Optimal for Flash write expiration)"
+    else
+        report_warn "vm.dirty_expire_centisecs: $dirty_expire is default (30s)" "Run optimize.sh to increase dirty expire delay."
+    fi
+
     # Swap / ZRAM
     if grep -q "/dev/zram" /proc/swaps; then
         report_pass "ZRAM Swap: Active"
@@ -373,6 +388,22 @@ check_storage() {
         report_pass "Root Partition: ${root_usage}% used"
     else
         report_fail "Root Partition: ${root_usage}% used (Critical)" "Clean up logs or docker images."
+    fi
+
+    # Root mount options checks (noatime, commit)
+    local root_fs_type root_fs_opts
+    read -r root_fs_type root_fs_opts <<< "$(findmnt -n -o FSTYPE,OPTIONS -T /)"
+    if [[ "$root_fs_opts" == *"noatime"* ]]; then
+        report_pass "Root Mount Option: noatime active"
+    else
+        report_warn "Root Mount Option: noatime MISSING" "Run optimize.sh to optimize root partition."
+    fi
+    if [[ "$root_fs_type" == "ext4" ]]; then
+        if [[ "$root_fs_opts" == *"commit="* ]]; then
+            report_pass "Root Mount Option: commit interval adjusted ($root_fs_opts)"
+        else
+            report_warn "Root Mount Option: commit interval default" "Run optimize.sh to set commit=10."
+        fi
     fi
 
     # USB Mount Check
