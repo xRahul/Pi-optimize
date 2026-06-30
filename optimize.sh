@@ -739,6 +739,57 @@ optimize_memory() {
         log_pass "Swap entries in fstab disabled"
     fi
 
+    # Configure rpi-swap (Raspberry Pi OS Bookworm/Trixie) to use ZRAM only, preventing file writeback
+    if [[ -f /etc/rpi/swap.conf ]]; then
+        log_info "Configuring rpi-swap to use ZRAM-only mechanism..."
+        local rpi_swap_conf="/etc/rpi/swap.conf"
+        
+        # Disable hybrid swap by switching mechanism to zram
+        if grep -q "^Mechanism=zram$" "$rpi_swap_conf"; then
+            log_skip "rpi-swap mechanism already configured to zram"
+        elif grep -q "^#Mechanism=auto" "$rpi_swap_conf"; then
+            sed -i 's/^#Mechanism=auto/Mechanism=zram/' "$rpi_swap_conf"
+            log_pass "rpi-swap mechanism configured to zram"
+        elif grep -q "^Mechanism=" "$rpi_swap_conf"; then
+            sed -i 's/^Mechanism=.*/Mechanism=zram/' "$rpi_swap_conf"
+            log_pass "rpi-swap mechanism updated to zram"
+        else
+            # No Mechanism line exists at all — insert under [Main] section
+            sed -i '/^\[Main\]/a Mechanism=zram' "$rpi_swap_conf"
+            log_pass "rpi-swap mechanism set to zram under [Main]"
+        fi
+
+        # Safely detach loop device if it holds a deleted swap file
+        if losetup -a 2>/dev/null | grep -q "/var/swap (deleted)"; then
+            log_info "Detaching locked /var/swap (deleted) to reclaim space..."
+            
+            # 1. Deactivate zram swap (it may have a backing_dev pointing at the loop)
+            swapoff /dev/zram0 2>/dev/null || true
+            zramctl --reset /dev/zram0 2>/dev/null || true
+            
+            # 2. Find and detach the specific loop device holding the deleted file
+            local loop_dev
+            loop_dev=$(losetup -a 2>/dev/null | grep "/var/swap (deleted)" | cut -d: -f1 | head -n1)
+            if [[ -n "$loop_dev" ]]; then
+                losetup -d "$loop_dev" 2>/dev/null || true
+            fi
+            
+            # 3. Clear any failed state from old units before restarting
+            systemctl reset-failed systemd-zram-setup@zram0.service 2>/dev/null || true
+            systemctl reset-failed rpi-zram-writeback.timer 2>/dev/null || true
+            systemctl reset-failed rpi-setup-loop@var-swap.service 2>/dev/null || true
+            
+            # 4. Reload generators so they regenerate zram-only config (no loop dependency)
+            systemctl daemon-reload
+            
+            # 5. Start zram device AND activate swap on it
+            systemctl start systemd-zram-setup@zram0.service 2>/dev/null || true
+            systemctl start dev-zram0.swap 2>/dev/null || true
+            
+            log_pass "Locked swap file detached, ZRAM restarted, disk space reclaimed"
+        fi
+    fi
+
     # 2. ZRAM Setup (systemd-zram-generator)
     log_info "Configuring systemd-zram-generator..."
     

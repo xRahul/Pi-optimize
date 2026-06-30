@@ -255,7 +255,14 @@ check_resources() {
     # Swappiness
     local swappiness
     swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "60")
+    # Check both runtime state and rpi-swap config intent
+    local zram_configured=0
     if grep -q "/dev/zram" /proc/swaps; then
+        zram_configured=1
+    elif [[ -f /etc/rpi/swap.conf ]] && grep -q "^Mechanism=zram" /etc/rpi/swap.conf; then
+        zram_configured=1
+    fi
+    if [[ $zram_configured -eq 1 ]]; then
         if [ "$swappiness" -ge 100 ]; then
             report_pass "Swappiness: $swappiness (Optimal for ZRAM)"
         else
@@ -328,11 +335,26 @@ check_resources() {
         fi
     fi
 
-    # Orphaned /var/swap
+    # Orphaned /var/swap and locked loop devices
+    local has_orphaned_file=0
+    local has_locked_loop=0
+    local swap_size=""
+    
     if [[ -f /var/swap ]]; then
-        local swap_size
+        has_orphaned_file=1
         swap_size=$(du -sh /var/swap 2>/dev/null | cut -f1)
+    fi
+    
+    if losetup -a 2>/dev/null | grep -q "/var/swap (deleted)"; then
+        has_locked_loop=1
+    fi
+    
+    if [[ $has_orphaned_file -eq 1 && $has_locked_loop -eq 1 ]]; then
+        report_warn "Orphaned /var/swap ($swap_size) on flash and locked by loop device" "Run optimize.sh to fully remove and detach it."
+    elif [[ $has_orphaned_file -eq 1 ]]; then
         report_warn "Orphaned /var/swap ($swap_size) on flash" "Run optimize.sh to remove it."
+    elif [[ $has_locked_loop -eq 1 ]]; then
+        report_warn "Deleted /var/swap is locked in RAM (loop device active)" "Run optimize.sh to detach it and reclaim disk space."
     fi
 }
 
