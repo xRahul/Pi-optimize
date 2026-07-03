@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.3.0"
+SCRIPT_VERSION="4.4.0"
 LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
@@ -204,6 +204,108 @@ check_hardware() {
              report_info "PMIC: Power Management IC accessible"
         fi
     fi
+
+    # PCIe Link Speed Check (Pi 5 NVMe)
+    if command_exists lspci; then
+        local nvme_addr
+        nvme_addr=$(lspci | grep -i "Non-Volatile memory" | awk '{print $1}' | head -n1 || echo "")
+        if [[ -n "$nvme_addr" ]]; then
+            local lnksta
+            lnksta=$(lspci -s "$nvme_addr" -vv 2>/dev/null | grep "LnkSta:" | head -n1 || echo "")
+            if [[ -n "$lnksta" ]]; then
+                if [[ "$lnksta" == *"Speed 8GT/s"* ]]; then
+                    report_pass "PCIe Link Speed: Gen 3 (8GT/s) active"
+                elif [[ "$lnksta" == *"Speed 5GT/s"* ]]; then
+                    report_pass "PCIe Link Speed: Gen 2 (5GT/s) active (optimal for endurance)"
+                else
+                    report_info "PCIe Link Speed: $lnksta"
+                fi
+                
+                # Check link width
+                if [[ "$lnksta" == *"Width x1"* ]]; then
+                    report_pass "PCIe Link Width: x1 active (optimal for Pi 5)"
+                else
+                    report_info "PCIe Link Width: $lnksta"
+                fi
+            fi
+        fi
+    fi
+
+    # Boot Config verification (/boot/firmware/config.txt)
+    local config_file="/boot/firmware/config.txt"
+    if [[ -f "$config_file" ]]; then
+        local config_content
+        config_content=$(cat "$config_file" 2>/dev/null || echo "")
+        
+        # Check PCIe configs
+        if echo "$config_content" | grep -q "^dtparam=pciex1$" || echo "$config_content" | grep -q "^dtparam=nvme$"; then
+            report_pass "Boot Config: PCIe interface enabled"
+        else
+            report_warn "Boot Config: PCIe interface (dtparam=pciex1) not enabled in config.txt" "Run optimize.sh to enable PCIe."
+        fi
+        
+        if echo "$config_content" | grep -q "^dtparam=pciex1_gen=2"; then
+            report_pass "Boot Config: PCIe speed set to Gen 2"
+        elif echo "$config_content" | grep -q "^dtparam=pciex1_gen=3"; then
+            report_warn "Boot Config: PCIe speed set to Gen 3" "Consider Gen 2 for lower power/heat and maximum endurance."
+        else
+            report_info "Boot Config: PCIe speed defaults to Gen 2"
+        fi
+        
+        # Check Overclock
+        if echo "$config_content" | grep -qE "^(arm_freq|gpu_freq|over_voltage_delta)"; then
+            local active_overclocks
+            active_overclocks=$(echo "$config_content" | grep -E "^(arm_freq|gpu_freq|over_voltage_delta)" | xargs || echo "")
+            report_warn "Boot Config: Overclock active ($active_overclocks)" "For maximum endurance, run stock clocks."
+        else
+            report_pass "Boot Config: No overclock active (stock clocks)"
+        fi
+        
+        # Check GPU Memory
+        if echo "$config_content" | grep -q "^gpu_mem="; then
+            local gmem
+            gmem=$(echo "$config_content" | grep "^gpu_mem=" | cut -d= -f2 || echo "")
+            if [[ "$gmem" -le 16 ]]; then
+                report_pass "Boot Config: GPU Memory split optimized ($gmem MB)"
+            else
+                report_warn "Boot Config: GPU Memory split is $gmem MB" "Run optimize.sh to reduce to 16MB for headless server."
+            fi
+        fi
+    fi
+
+    # Kernel Cmdline verification (/boot/firmware/cmdline.txt)
+    local cmdline_file="/boot/firmware/cmdline.txt"
+    if [[ -f "$cmdline_file" ]]; then
+        local cmdline_content
+        cmdline_content=$(cat "$cmdline_file" 2>/dev/null || echo "")
+        
+        if echo "$cmdline_content" | grep -q "nvme_core.default_ps_max_latency_us=0"; then
+            report_pass "Kernel Cmdline: APST sleep workaround active"
+        else
+            report_warn "Kernel Cmdline: nvme_core.default_ps_max_latency_us=0 is missing" "Run optimize.sh to prevent NVMe dropouts."
+        fi
+    fi
+
+    # EEPROM Config verification
+    if command_exists rpi-eeprom-config; then
+        local eeprom_conf
+        eeprom_conf=$(rpi-eeprom-config 2>/dev/null || echo "")
+        if [[ -n "$eeprom_conf" ]]; then
+            local boot_order
+            boot_order=$(echo "$eeprom_conf" | grep "^BOOT_ORDER=" | cut -d= -f2 || echo "")
+            if [[ "$boot_order" =~ 6$ ]]; then
+                report_pass "EEPROM Config: Boot order prioritizes NVMe ($boot_order)"
+            else
+                report_warn "EEPROM Config: Boot order ($boot_order) does not prioritize NVMe" "Run optimize.sh to set BOOT_ORDER=0xf146."
+            fi
+            
+            if echo "$eeprom_conf" | grep -q "^PCIE_PROBE=1"; then
+                report_pass "EEPROM Config: PCIE_PROBE=1 is configured"
+            else
+                report_warn "EEPROM Config: PCIE_PROBE=1 is missing" "Run optimize.sh to force PCIe probing."
+            fi
+        fi
+    fi
 }
 
 ################################################################################
@@ -291,23 +393,50 @@ check_resources() {
         report_warn "vm.dirty_expire_centisecs: $dirty_expire is default (30s)" "Run optimize.sh to increase dirty expire delay."
     fi
 
-    # Swap / ZRAM
+    # Swap / ZRAM & Swapfile
+    local zram_active=0
+    local swapfile_active=0
+    local boot_is_nvme=0
+    
+    # Check if boot is NVMe
+    local boot_dev
+    boot_dev=$(findmnt -n -o SOURCE / 2>/dev/null)
+    local boot_disk
+    boot_disk=$(lsblk -nd -o PKNAME "$boot_dev" 2>/dev/null || echo "$boot_dev")
+    [[ -z "$boot_disk" ]] && boot_disk="$boot_dev"
+    local boot_tran
+    boot_tran=$(lsblk -nd -o TRAN "$boot_disk" 2>/dev/null)
+    [[ "$boot_tran" == "nvme" ]] && boot_is_nvme=1
+
     if grep -q "/dev/zram" /proc/swaps; then
+        zram_active=1
         report_pass "ZRAM Swap: Active"
-        # Check generator config
         if [[ -f /etc/systemd/zram-generator.conf ]]; then
              report_pass "ZRAM Config: systemd-zram-generator detected"
         fi
-        # Optional: Check zramctl status
         if command_exists zramctl; then
             local z_orig z_comp
             z_orig=$(zramctl --noheadings --output DATA | awk '{sum+=$1} END {print sum/1024/1024}')
             z_comp=$(zramctl --noheadings --output COMPR | awk '{sum+=$1} END {print sum/1024/1024}')
             report_info "ZRAM Stats: $(printf "%.1f" "$z_orig")MB compressed to $(printf "%.1f" "$z_comp")MB"
         fi
-    else
+    fi
+
+    if grep -q "/swapfile" /proc/swaps; then
+        swapfile_active=1
+        local sf_priority
+        sf_priority=$(awk '/\/swapfile/ {print $5}' /proc/swaps)
+        if [[ $boot_is_nvme -eq 1 ]]; then
+            report_pass "NVMe Swapfile: Active (Priority: $sf_priority)"
+        else
+            report_warn "Swapfile: Active on non-NVMe storage (Priority: $sf_priority)" "Disable disk swap on flash media to prevent wear."
+        fi
+    fi
+
+    # Overall swap assessment
+    if [[ $zram_active -eq 0 && $swapfile_active -eq 0 ]]; then
         if grep -q "partition" /proc/swaps || grep -q "file" /proc/swaps; then
-            report_warn "Swap: Disk-based swap detected" "Run optimize.sh to switch to ZRAM (better for flash longevity)."
+            report_warn "Swap: Non-standard disk-based swap active" "Run optimize.sh to configure ZRAM."
         else
             report_warn "Swap: No swap active" "ZRAM is recommended for stability."
         fi
@@ -456,28 +585,81 @@ check_storage() {
 
     # SMART Health Check
     if command_exists smartctl; then
-        local disk_dev
-        disk_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null | sed 's/[0-9]*$//')
-        if [[ -b "$disk_dev" ]]; then
+        # Identify boot disk and USB disk
+        local boot_dev
+        boot_dev=$(findmnt -n -o SOURCE / 2>/dev/null)
+        local boot_disk
+        boot_disk=$(lsblk -nd -o PKNAME "$boot_dev" 2>/dev/null || echo "$boot_dev")
+        [[ -z "$boot_disk" ]] && boot_disk="$boot_dev"
+        boot_disk=$(basename "$boot_disk")
+        [[ "$boot_disk" != /dev/* ]] && boot_disk="/dev/$boot_disk"
+
+        local usb_dev
+        usb_dev=$(findmnt -n -o SOURCE -T "$USB_MOUNT_POINT" 2>/dev/null)
+        local usb_disk
+        usb_disk=$(lsblk -nd -o PKNAME "$usb_dev" 2>/dev/null || echo "$usb_dev")
+        [[ -z "$usb_disk" ]] && usb_disk="$usb_dev"
+        usb_disk=$(basename "$usb_disk")
+        [[ "$usb_disk" != /dev/* ]] && usb_disk="/dev/$usb_disk"
+
+        # Unique list of disks to check
+        local disks_to_check=()
+        [[ -b "$boot_disk" ]] && disks_to_check+=("$boot_disk")
+        if [[ -b "$usb_disk" && "$usb_disk" != "$boot_disk" ]]; then
+            disks_to_check+=("$usb_disk")
+        fi
+
+        for disk_dev in "${disks_to_check[@]}"; do
             local smart_status=""
-            # Try standard, then sat, then scsi
-            for dtype in "" "sat" "scsi"; do
+            local dtypes=("" "sat" "scsi")
+            if [[ "$disk_dev" == *nvme* ]]; then
+                dtypes=("nvme" "${dtypes[@]}")
+            fi
+            for dtype in "${dtypes[@]}"; do
                 local dflag=""
                 [[ -n "$dtype" ]] && dflag="-d $dtype"
                 smart_status=$(smartctl $dflag -H "$disk_dev" 2>/dev/null | \
-                    grep -iE "test result|Health Status" | head -1 | \
+                    grep -iE "test result|Health Status|overall-health" | head -1 | \
                     grep -ioE "(PASSED|FAILED|OK)")
                 [[ -n "$smart_status" ]] && break
             done
             
-            if [[ "$smart_status" == "PASSED" || "$smart_status" == "OK" ]]; then
-                report_pass "SMART Health: $smart_status ($disk_dev)"
-            elif [[ -z "$smart_status" ]]; then
-                report_info "SMART Health: Unsupported on this drive/bridge ($disk_dev)"
-            else
-                report_fail "SMART Health: $smart_status ($disk_dev)" "Drive may be failing!"
+            local disk_label="Boot Drive"
+            if [[ "$disk_dev" == "$usb_disk" ]]; then
+                disk_label="USB Storage"
             fi
-        fi
+
+            if [[ "$smart_status" == "PASSED" || "$smart_status" == "OK" ]]; then
+                report_pass "SMART Health: $smart_status ($disk_label: $disk_dev)"
+            elif [[ -z "$smart_status" ]]; then
+                report_info "SMART Health: Unsupported on $disk_label ($disk_dev)"
+            else
+                report_fail "SMART Health: $smart_status ($disk_label: $disk_dev)" "Drive may be failing!"
+            fi
+
+            # Rich NVMe metrics if nvme-cli is installed and this is an NVMe disk
+            if [[ "$disk_dev" == *nvme* ]] && command_exists nvme; then
+                local nvme_log
+                nvme_log=$(nvme smart-log "$disk_dev" 2>/dev/null || true)
+                if [[ -n "$nvme_log" ]]; then
+                    local temp wear spare errors
+                    temp=$(echo "$nvme_log" | awk -F: '/temperature/ { if (match($0, /[0-9]+[ ]*C/)) { val = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", val); print val } else { match($0, /[0-9]+/); val = substr($0, RSTART, RLENGTH); if (val > 150) print val - 273; else print val } }')
+                    wear=$(echo "$nvme_log" | awk -F: '/percentage_used/ {gsub(/[^0-9]/,"",$2); print $2}')
+                    spare=$(echo "$nvme_log" | awk -F: '/available_spare/ {if(!/threshold/) {gsub(/[^0-9]/,"",$2); print $2}}')
+                    errors=$(echo "$nvme_log" | awk -F: '/media_errors/ {gsub(/[^0-9]/,"",$2); print $2}')
+                    
+                    local metrics=""
+                    [[ -n "$temp" ]] && metrics+="Temp: ${temp}°C, "
+                    [[ -n "$wear" ]] && metrics+="Wear: ${wear}%, "
+                    [[ -n "$spare" ]] && metrics+="Spare: ${spare}%, "
+                    [[ -n "$errors" ]] && metrics+="Media Errors: ${errors}"
+                    
+                    if [[ -n "$metrics" ]]; then
+                        report_info "NVMe Metrics: $metrics"
+                    fi
+                fi
+            fi
+        done
     fi
 }
 
@@ -675,14 +857,16 @@ check_system_services() {
     log_section_diag "SYSTEM SERVICES"
 
     # Logging
-    if pgrep syslogd >/dev/null; then
-        if command_exists logread; then
+    if pgrep syslogd >/dev/null || pgrep rsyslogd >/dev/null; then
+        if pgrep rsyslogd >/dev/null; then
+            report_pass "Logging: Persistent rsyslog active"
+        elif command_exists logread; then
             report_pass "Logging: Busybox RAM-based syslog active"
         else
             report_pass "Logging: Syslogd active"
         fi
     else
-        report_warn "Logging: System logger (syslogd) NOT FOUND" "Ensure busybox-syslogd or rsyslog is installed."
+        report_warn "Logging: System logger (syslogd/rsyslogd) NOT FOUND" "Ensure busybox-syslogd or rsyslog is installed."
     fi
 
     # Entropy

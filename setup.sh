@@ -21,9 +21,10 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.3.0"
+SCRIPT_VERSION="4.4.0"
 # shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
+BOOT_TRAN=""
 # CONFIG_FILE="/boot/firmware/config.txt" # Unused in setup.sh directly, used in optimize.sh
 # BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S) # Unused in setup.sh
 
@@ -90,14 +91,16 @@ preflight_checks() {
     local parent_dev
     parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
-    local boot_tran
-    boot_tran=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+    BOOT_TRAN=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
     
-    if [[ "$boot_tran" == "usb" ]]; then
+    if [[ "$BOOT_TRAN" == "usb" ]]; then
         log_pass "Boot Drive: USB Flash/SSD detected"
         log_info "Flash wear-level optimizations (RAM logging, delayed writebacks, adjusted commit intervals) will be applied."
+    elif [[ "$BOOT_TRAN" == "nvme" ]]; then
+        log_pass "Boot Drive: NVMe SSD detected"
+        log_info "High-performance SSD boot drive. Standard persistent logging will be configured."
     else
-        log_warn "Boot Drive: ${boot_tran:-Unknown} (Not USB). Flash wear-level optimizations will still be configured for media safety."
+        log_warn "Boot Drive: ${BOOT_TRAN:-Unknown} (Not USB/NVMe). Flash wear-level optimizations will still be configured for media safety."
     fi
 }
 
@@ -112,14 +115,24 @@ system_core() {
     # shellcheck disable=SC2015
     apt-get update && apt-get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
+
+    if command_exists rpi-eeprom-update; then
+        log_info "Checking for bootloader EEPROM updates..."
+        rpi-eeprom-update -a || log_warn "EEPROM update failed or no update available"
+    fi
     
     local packages=(
         "ca-certificates" "curl" "gnupg" "git" "jq" "bc" 
         "usbutils" "util-linux" "watchdog" "e2fsprogs" 
         "smartmontools" "cpufrequtils" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
-        "busybox-syslogd" "bats"
+        "bats"
     )
+    if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
+        packages+=("rsyslog" "nvme-cli")
+    else
+        packages+=("busybox-syslogd")
+    fi
     
     # Optimize: Bulk check installed packages
     declare -A installed_map
@@ -129,6 +142,16 @@ system_core() {
             installed_map["$name"]=1
         fi
     done < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null)
+
+    # If booting from NVMe, ensure busybox-syslogd is purged to prevent conflicts
+    if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
+        if [[ -n "${installed_map[busybox-syslogd]:-}" ]]; then
+            log_info "Removing busybox-syslogd on NVMe boot drive to enable persistent logging..."
+            apt-get purge -y busybox-syslogd >/dev/null 2>&1 || true
+            rm -f /etc/syslog.conf 2>/dev/null || true
+            log_pass "busybox-syslogd removed"
+        fi
+    fi
 
     for pkg in "${packages[@]}"; do
         if [[ -n "${installed_map[$pkg]:-}" ]]; then

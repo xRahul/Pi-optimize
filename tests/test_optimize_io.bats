@@ -121,9 +121,10 @@ teardown() {
 
     echo "$output"
     [[ "$output" =~ "Root filesystem already has noatime" ]]
-    # Ensure it wasn't added twice
-    run grep -c "noatime" "$FSTAB_FILE"
-    [ "$output" -eq 1 ]
+    # Ensure it wasn't added twice to the root line
+    run grep "UUID=1234-5678" "$FSTAB_FILE"
+    [[ "$output" =~ "defaults,noatime" ]]
+    [[ ! "$output" =~ "noatime,noatime" ]]
 }
 
 @test "optimize_storage adds commit=10 to root if ext4 and missing" {

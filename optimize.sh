@@ -22,11 +22,12 @@ else
 fi
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.3.0"
+SCRIPT_VERSION="4.4.0"
 CONFIG_FILE="/boot/firmware/config.txt"
 export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
 LOCK_FILE="/run/rpi-optimize.lock"
+BOOT_TRAN=""
 
 # Counters (Globals used by utils.sh)
 OPTIMIZATIONS_APPLIED=0
@@ -81,6 +82,20 @@ ensure_dependencies() {
     fi
 }
 
+add_cmdline_param() {
+    local param="$1"
+    local cmdline_file="/boot/firmware/cmdline.txt"
+    if [[ -f "$cmdline_file" ]]; then
+        if grep -q -F "$param" "$cmdline_file"; then
+            log_skip "Kernel parameter '$param' already in cmdline.txt"
+        else
+            # Trim spaces, remove existing trailing spaces, append param on the single line
+            sed -i -E "s/[[:space:]]*$/ ${param}/" "$cmdline_file"
+            log_pass "Kernel parameter '$param' added to cmdline.txt"
+        fi
+    fi
+}
+
 ################################################################################
 # 1. Hardware & Thermal
 ################################################################################
@@ -111,21 +126,33 @@ EOF
         log_pass "Fan curve optimized"
     fi
 
-    # Pi 5 PCIe Gen 3 (Safe for most HATs/NVMe)
-    if grep -q "^dtparam=pciex1_gen=3" "$CONFIG_FILE"; then
-        log_skip "PCIe Gen 3 already enabled"
+    # Pi 5 PCIe Config (Gen 2 for maximum stability/endurance)
+    # Remove/comment any pciex1_gen=3 entries to avoid conflicts
+    if grep -q "pciex1_gen=3" "$CONFIG_FILE"; then
+        sed -i 's/^dtparam=pciex1_gen=3/# dtparam=pciex1_gen=3  # Disabled by optimize.sh for Gen 2/' "$CONFIG_FILE"
+    fi
+
+    if grep -q "^dtparam=pciex1$" "$CONFIG_FILE" || grep -q "^dtparam=nvme$" "$CONFIG_FILE"; then
+        log_skip "PCIe interface already enabled in config.txt"
     else
-        echo "dtparam=pciex1_gen=3" >> "$CONFIG_FILE"
-        log_pass "PCIe Gen 3 enabled (Pi 5)"
+        echo "dtparam=pciex1" >> "$CONFIG_FILE"
+        log_pass "PCIe interface enabled (Pi 5)"
+    fi
+
+    if grep -q "^dtparam=pciex1_gen=2" "$CONFIG_FILE"; then
+        log_skip "PCIe Gen 2 already configured in config.txt"
+    else
+        echo "dtparam=pciex1_gen=2" >> "$CONFIG_FILE"
+        log_pass "PCIe Gen 2 configured (Pi 5)"
     fi
 
     # Reduce GPU Memory (Server mode)
     if grep -q "^gpu_mem=" "$CONFIG_FILE"; then
-        sed -i 's/^gpu_mem=.*/gpu_mem=32/' "$CONFIG_FILE"
-        log_pass "GPU memory reduced to 32MB"
+        sed -i 's/^gpu_mem=.*/gpu_mem=16/' "$CONFIG_FILE"
+        log_pass "GPU memory reduced to 16MB"
     else
-        echo "gpu_mem=32" >> "$CONFIG_FILE"
-        log_pass "GPU memory set to 32MB"
+        echo "gpu_mem=16" >> "$CONFIG_FILE"
+        log_pass "GPU memory set to 16MB"
     fi
 
     # Disable Bluetooth & Audio (Saves power/interrupts)
@@ -145,6 +172,40 @@ EOF
         log_pass "dtparam=audio=off enabled (existing audio=on commented out)"
     fi
 
+    # Smart Wi-Fi Disablement
+    local wifi_active=false
+    if command_exists ip; then
+        if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
+            wifi_active=true
+        fi
+    fi
+
+    if [[ "$wifi_active" == "false" ]]; then
+        local eth_active=false
+        if ip -4 addr show eth0 2>/dev/null | grep -q "inet " || ip -4 addr show end0 2>/dev/null | grep -q "inet "; then
+            eth_active=true
+        fi
+
+        if [[ "$eth_active" == "true" ]]; then
+            if grep -q "^dtoverlay=disable-wifi" "$CONFIG_FILE"; then
+                log_skip "dtoverlay=disable-wifi already set"
+            else
+                echo "dtoverlay=disable-wifi" >> "$CONFIG_FILE"
+                log_pass "Ethernet active & Wi-Fi unused: disabled Wi-Fi to reduce heat/power"
+            fi
+        else
+            log_skip "Neither Wi-Fi nor Ethernet active or detected. Keeping Wi-Fi enabled for safety."
+        fi
+    else
+        log_skip "Wi-Fi is currently in use (active IP detected). Keeping Wi-Fi enabled."
+    fi
+
+    # Ensure overclock parameters are commented out for system endurance
+    if grep -qE "^(arm_freq|gpu_freq|over_voltage_delta)" "$CONFIG_FILE"; then
+        sed -i -E 's/^(arm_freq|gpu_freq|over_voltage_delta)/# \1  # Disabled by optimize.sh for endurance/' "$CONFIG_FILE"
+        log_pass "Overclock parameters disabled/removed for stability"
+    fi
+
     # Hardware Watchdog
     if grep -q "^dtparam=watchdog=on" "$CONFIG_FILE"; then
         log_skip "Hardware watchdog already enabled"
@@ -158,18 +219,7 @@ EOF
     fi
 
     # USB Autosuspend (Vital for USB Boot/Storage)
-    local cmdline_file="/boot/firmware/cmdline.txt"
-    if [[ -f "$cmdline_file" ]]; then
-        if grep -q "usbcore.autosuspend=-1" "$cmdline_file"; then
-            log_skip "USB autosuspend already disabled"
-        else
-            # Append to the end of the line, keeping it on one line
-            sed -i 's/$/ usbcore.autosuspend=-1/' "$cmdline_file"
-            log_pass "USB autosuspend disabled (improves USB drive stability)"
-        fi
-    else
-        log_warn "cmdline.txt not found, skipping USB autosuspend optimization"
-    fi
+    add_cmdline_param "usbcore.autosuspend=-1"
 }
 
 ################################################################################
@@ -281,6 +331,31 @@ optimize_storage() {
         done
     fi
 
+    # 2b. I/O Scheduler (none for NVMe)
+    log_info "Configuring NVMe scheduler..."
+    local nvme_devices
+    nvme_devices=$(lsblk -d -n -o NAME 2>/dev/null | grep nvme || echo "")
+    if [[ -z "$nvme_devices" ]]; then
+        log_skip "No NVMe devices found for I/O scheduler optimization"
+    else
+        local sys_block_dir="${SYS_BLOCK_DIR:-/sys/block}"
+        for dev in $nvme_devices; do
+            local sched_file="$sys_block_dir/$dev/queue/scheduler"
+            if [[ -f "$sched_file" ]]; then
+                local sched_content
+                sched_content=$(<"$sched_file")
+
+                # Check if none is active
+                if [[ "$sched_content" == *"[none]"* ]]; then
+                    log_skip "none scheduler already active for $dev"
+                elif [[ "$sched_content" == *"none"* ]]; then
+                    # shellcheck disable=SC2015
+                    echo "none" > "$sched_file" 2>/dev/null && log_pass "none scheduler set for $dev" || log_warn "Failed to set none scheduler for $dev"
+                fi
+            fi
+        done
+    fi
+
     # 3. fstrim for SSDs (if applicable)
     if systemctl list-unit-files | grep -q fstrim.timer; then
         if systemctl is-active --quiet fstrim.timer; then
@@ -365,7 +440,7 @@ EOF
 
     if files_differ "$sysctl_conf" "$tmp_conf"; then
         backup_file "$sysctl_conf"
-        mv "$tmp_conf" "$sysctl_conf"
+        mv -f "$tmp_conf" "$sysctl_conf"
         sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
         log_pass "Kernel parameters optimized (including BBR & Security)"
     else
@@ -392,6 +467,9 @@ EOF
 
     # Apply all sysctl configs
     sysctl --system > /dev/null 2>&1
+
+    # APST Sleep Workaround to prevent NVMe drive lockups/disconnects
+    add_cmdline_param "nvme_core.default_ps_max_latency_us=0"
 }
 
 ################################################################################
@@ -694,7 +772,7 @@ WantedBy=multi-user.target
 EOF
 
     if files_differ "$service_file" "$tmp_service"; then
-        mv "$tmp_service" "$service_file"
+        mv -f "$tmp_service" "$service_file"
         systemctl daemon-reload
         log_pass "Tailscale boot fix service updated"
     else
@@ -716,7 +794,7 @@ EOF
 optimize_memory() {
     log_section "MEMORY & SWAP"
 
-    # 1. Disable Disk-based Swap (Permanent)
+    # 1. Disable Disk-based Swap (Permanent for flash, hybrid/overflow for NVMe)
     log_info "Configuring swap settings..."
     
     # Disable and purge dphys-swapfile (Raspberry Pi default)
@@ -731,14 +809,6 @@ optimize_memory() {
         log_pass "dphys-swapfile service disabled and swap file removed"
     fi
 
-    # Disable runtime disk swap
-    local other_swaps
-    other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}' || true)
-    if [[ -n "$other_swaps" ]]; then
-        echo "$other_swaps" | xargs -r swapoff 2>/dev/null || true
-        log_pass "Active disk swap(s) disabled"
-    fi
-
     # Explicitly remove any orphaned /var/swap file (may persist even if dphys-swapfile is gone)
     # This reclaims the 2GB the default dphys-swapfile creates on the OS flash drive
     if [[ -f /var/swap ]]; then
@@ -747,10 +817,73 @@ optimize_memory() {
         log_pass "Orphaned /var/swap file removed (flash space reclaimed)"
     fi
 
-    # Disable fstab swap entries
-    if grep -E "^[^#].*\sswap\s" /etc/fstab >/dev/null; then
-        sed -i '/\sswap\s/ s/^/#/' /etc/fstab
-        log_pass "Swap entries in fstab disabled"
+    if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
+        log_info "NVMe boot detected. Configuring 4GB static swapfile for memory overflow..."
+        
+        # Disable fstab swap entries that are NOT our swapfile
+        if grep -E "^[^#].*\sswap\s" /etc/fstab | grep -v "/swapfile" >/dev/null; then
+            sed -i '/\/swapfile/! s/\sswap\s/#\0/' /etc/fstab
+            log_pass "Non-swapfile fstab entries disabled"
+        fi
+
+        # Disable any active non-zram, non-swapfile swaps
+        local bad_swaps
+        bad_swaps=$(swapon --show --noheadings | grep -v "zram" | grep -v "/swapfile" | awk '{print $1}' || true)
+        if [[ -n "$bad_swaps" ]]; then
+            echo "$bad_swaps" | xargs -r swapoff 2>/dev/null || true
+            log_pass "Active flash/unwanted swap(s) disabled"
+        fi
+
+        # Create 4GB swapfile on NVMe if not exists or size is wrong
+        local create_swap=false
+        if [[ ! -f /swapfile ]]; then
+            create_swap=true
+        else
+            local sf_size
+            sf_size=$(du -m /swapfile | cut -f1)
+            if [[ $sf_size -lt 4000 ]]; then
+                swapoff /swapfile 2>/dev/null || true
+                rm -f /swapfile
+                create_swap=true
+            fi
+        fi
+
+        if [[ "$create_swap" == "true" ]]; then
+            log_info "Creating 4GB swapfile on NVMe..."
+            fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
+            chmod 600 /swapfile
+            mkswap /swapfile
+            log_pass "Swapfile initialized"
+        fi
+
+        # Enable swapfile with priority 10
+        if swapon --show --noheadings | grep -q "/swapfile"; then
+            log_skip "Swapfile already active"
+        else
+            swapon -p 10 /swapfile 2>/dev/null && log_pass "Swapfile activated (priority 10)" || log_warn "Failed to activate swapfile"
+        fi
+
+        # Ensure in fstab
+        if grep -q "/swapfile" /etc/fstab; then
+            log_skip "Swapfile already configured in fstab"
+        else
+            echo "/swapfile  none  swap  sw,pri=10,nofail  0  0" >> /etc/fstab
+            log_pass "Swapfile configured in fstab"
+        fi
+    else
+        # Disable all disk-based swap for flash media
+        local other_swaps
+        other_swaps=$(swapon --show --noheadings | grep -v "zram" | awk '{print $1}' || true)
+        if [[ -n "$other_swaps" ]]; then
+            echo "$other_swaps" | xargs -r swapoff 2>/dev/null || true
+            log_pass "Active disk swap(s) disabled"
+        fi
+
+        # Disable fstab swap entries
+        if grep -E "^[^#].*\sswap\s" /etc/fstab >/dev/null; then
+            sed -i '/\sswap\s/ s/^/#/' /etc/fstab
+            log_pass "Swap entries in fstab disabled"
+        fi
     fi
 
     # Configure rpi-swap (Raspberry Pi OS Bookworm/Trixie) to use ZRAM only, preventing file writeback
@@ -826,7 +959,7 @@ fs-type = swap
 EOF
 
     if files_differ "$zram_conf" "$tmp_zram"; then
-        mv "$tmp_zram" "$zram_conf"
+        mv -f "$tmp_zram" "$zram_conf"
         systemctl daemon-reload
         systemctl start /dev/zram0 2>/dev/null || true
         log_pass "systemd-zram-generator configured (zstd, 50% RAM up to 4G)"
@@ -858,9 +991,21 @@ EOF
     local enforcer_service="/etc/systemd/system/disk-swap-enforcer.service"
     local enforcer_timer="/etc/systemd/system/disk-swap-enforcer.timer"
 
-    if [[ ! -f "$enforcer_script" ]]; then
-        log_info "Setting up continuous disk swap enforcer..."
-        cat > "$enforcer_script" << 'EOF'
+    if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
+        if [[ -f "$enforcer_timer" ]]; then
+            log_info "NVMe boot detected. Disabling and removing hourly disk-swap-enforcer..."
+            systemctl disable --now disk-swap-enforcer.timer 2>/dev/null || true
+            systemctl stop disk-swap-enforcer.service 2>/dev/null || true
+            rm -f "$enforcer_script" "$enforcer_service" "$enforcer_timer" 2>/dev/null
+            systemctl daemon-reload
+            log_pass "Disk-swap-enforcer disabled and removed (unnecessary for NVMe SSD)"
+        else
+            log_skip "Disk-swap-enforcer is not installed"
+        fi
+    else
+        if [[ ! -f "$enforcer_script" ]]; then
+            log_info "Setting up continuous disk swap enforcer..."
+            cat > "$enforcer_script" << 'EOF'
 #!/bin/bash
 # Checks if any disk-based swap has been enabled and turns it off to protect flash media.
 # Ignores zram which is RAM-based.
@@ -872,11 +1017,11 @@ if [[ -n "$bad_swaps" ]]; then
     done
 fi
 EOF
-        chmod +x "$enforcer_script"
-    fi
+            chmod +x "$enforcer_script"
+        fi
 
-    if [[ ! -f "$enforcer_service" ]]; then
-        cat > "$enforcer_service" << 'EOF'
+        if [[ ! -f "$enforcer_service" ]]; then
+            cat > "$enforcer_service" << 'EOF'
 [Unit]
 Description=Enforce Flash Media Protection (Disable Disk Swap)
 After=local-fs.target
@@ -885,10 +1030,10 @@ After=local-fs.target
 Type=oneshot
 ExecStart=/usr/local/bin/disk-swap-enforcer
 EOF
-    fi
+        fi
 
-    if [[ ! -f "$enforcer_timer" ]]; then
-        cat > "$enforcer_timer" << 'EOF'
+        if [[ ! -f "$enforcer_timer" ]]; then
+            cat > "$enforcer_timer" << 'EOF'
 [Unit]
 Description=Run Disk Swap Enforcer Hourly
 
@@ -899,14 +1044,15 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-        systemctl daemon-reload
-        if systemctl enable --now disk-swap-enforcer.timer 2>/dev/null; then
-            log_pass "Hourly disk swap enforcer configured and activated"
+            systemctl daemon-reload
+            if systemctl enable --now disk-swap-enforcer.timer 2>/dev/null; then
+                log_pass "Hourly disk swap enforcer configured and activated"
+            else
+                log_warn "Failed to enable disk-swap-enforcer timer"
+            fi
         else
-            log_warn "Failed to enable disk-swap-enforcer timer"
+            log_skip "Disk swap enforcer already configured"
         fi
-    else
-        log_skip "Disk swap enforcer already configured"
     fi
 }
 
@@ -917,7 +1063,31 @@ EOF
 optimize_logs() {
     log_section "LOG MANAGEMENT"
 
-    # Journald volatile storage
+    if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
+        # On NVMe boot, we want persistent journaling and logging
+        local journal_conf="/etc/systemd/journald.conf.d/optimize.conf"
+        if [[ -f "$journal_conf" ]]; then
+            log_info "NVMe boot detected. Restoring persistent journald logging..."
+            rm -f "$journal_conf"
+            systemctl restart systemd-journald
+            log_pass "Journald volatile override removed (logs are now persistent)"
+        else
+            log_skip "Journald logging is already persistent"
+        fi
+        
+        # If busybox-syslogd is installed, purge it and install rsyslog to restore persistent syslog
+        if command_exists dpkg && dpkg -l | grep -q "busybox-syslogd"; then
+            log_info "NVMe boot detected. Removing busybox-syslogd and restoring rsyslog for persistent syslog..."
+            apt-get purge -y busybox-syslogd >/dev/null 2>&1 || true
+            rm -f /etc/syslog.conf 2>/dev/null || true
+            apt-get install -y rsyslog >/dev/null 2>&1 || true
+            systemctl restart rsyslog 2>/dev/null || true
+            log_pass "Syslog restored to persistent rsyslog"
+        fi
+        return
+    fi
+
+    # Journald volatile storage (for non-NVMe boot)
     local journal_conf_dir="/etc/systemd/journald.conf.d"
     local journal_conf="${journal_conf_dir}/optimize.conf"
     local tmp_conf
@@ -933,7 +1103,7 @@ Compress=yes
 EOF
 
     if files_differ "$journal_conf" "$tmp_conf"; then
-        mv "$tmp_conf" "$journal_conf"
+        mv -f "$tmp_conf" "$journal_conf"
         systemctl restart systemd-journald
         log_pass "Journald optimized for volatile storage"
     else
@@ -1083,6 +1253,68 @@ optimize_smartd() {
 }
 
 ################################################################################
+# 8b. EEPROM Bootloader Configuration
+################################################################################
+
+optimize_eeprom() {
+    log_section "EEPROM BOOTLOADER CONFIG"
+    if ! command_exists rpi-eeprom-config; then
+        log_skip "rpi-eeprom-config tool not available"
+        return
+    fi
+
+    # Check for updates
+    log_info "Checking for EEPROM bootloader updates..."
+    if rpi-eeprom-update -a >/dev/null 2>&1; then
+        log_pass "Bootloader firmware updated/verified"
+    else
+        log_warn "Bootloader update check skipped or failed"
+    fi
+
+    # Modify EEPROM settings
+    local current_config
+    current_config=$(rpi-eeprom-config)
+    local need_update=false
+    local new_config_file
+    new_config_file=$(mktemp)
+    echo "$current_config" > "$new_config_file"
+
+    # Ensure PCIE_PROBE=1
+    if ! grep -q "^PCIE_PROBE=" "$new_config_file"; then
+        echo "PCIE_PROBE=1" >> "$new_config_file"
+        need_update=true
+        log_info "Adding PCIE_PROBE=1 to EEPROM config"
+    fi
+
+    # Ensure BOOT_ORDER has NVMe priority (ends with 6)
+    if ! grep -q "^BOOT_ORDER=" "$new_config_file"; then
+        echo "BOOT_ORDER=0xf146" >> "$new_config_file"
+        need_update=true
+        log_info "Setting BOOT_ORDER=0xf146 in EEPROM config"
+    else
+        local current_order
+        current_order=$(grep "^BOOT_ORDER=" "$new_config_file" | cut -d= -f2)
+        if [[ ! "$current_order" =~ 6$ ]]; then
+            sed -i 's/^BOOT_ORDER=.*/BOOT_ORDER=0xf146/' "$new_config_file"
+            need_update=true
+            log_info "Updating BOOT_ORDER to 0xf146 to prioritize NVMe boot"
+        fi
+    fi
+
+    if [[ "$need_update" == "true" ]]; then
+        backup_file "/etc/default/rpi-eeprom-update" 2>/dev/null || true
+        if rpi-eeprom-config --apply "$new_config_file" >/dev/null 2>&1; then
+            log_pass "EEPROM configuration updated successfully"
+        else
+            log_warn "Failed to apply EEPROM configuration. Manual check required."
+        fi
+    else
+        log_skip "EEPROM configuration already optimized"
+    fi
+    rm -f "$new_config_file"
+}
+
+################################################################################
 # 9. Maintenance & Security
 ################################################################################
 
@@ -1188,6 +1420,14 @@ main() {
     acquire_lock
     ensure_dependencies
     
+    # Boot Drive Detection
+    local boot_dev
+    boot_dev=$(findmnt -n -o SOURCE /)
+    local parent_dev
+    parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
+    [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
+    BOOT_TRAN=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+    
     echo -e "${MAGENTA}"
     echo "██████╗ ██████╗ ██╗    ██████╗ ██████╗ ████████╗██╗███╗   ███╗██╗███████╗███████╗"
     echo "██╔══██╗██╔══██╗██║    ██╔══██╗██╔══██╗╚══██╔══╝██║████╗ ████║██║╚══███╔╝██╔════╝"
@@ -1197,6 +1437,13 @@ main() {
     echo "╚═╝  ╚═╝╚═╝     ╚═╝    ╚═════╝ ╚═╝        ╚═╝   ╚═╝╚═╝     ╚═╝╚═╝╚══════╝╚══════╝"
     echo -e "${NC}"
     log_info "RPI SERVER OPTIMIZER v${SCRIPT_VERSION}"
+    if [[ "$BOOT_TRAN" == "usb" ]]; then
+        log_info "Boot Drive: USB Flash/SSD detected. Applying flash-wear optimizations."
+    elif [[ "$BOOT_TRAN" == "nvme" ]]; then
+        log_info "Boot Drive: NVMe SSD detected. Keeping persistent logging."
+    else
+        log_info "Boot Drive: ${BOOT_TRAN:-Unknown}. Applying standard flash-wear optimizations."
+    fi
     log_info "Started at: $(date)"
     
     # Run modules
@@ -1212,6 +1459,7 @@ main() {
     optimize_logs
     optimize_smartd
     optimize_ollama_service
+    optimize_eeprom
     system_maintenance
     
     # Summary
