@@ -281,7 +281,7 @@ optimize_storage() {
     local fstab_file="${FSTAB_FILE:-/etc/fstab}"
     backup_file "$fstab_file"
 
-    # 1. Root noatime optimization & commit=10 for ext4 flash wear protection
+    # 1. Root noatime optimization & commit=60,lazytime for ext4 flash wear protection
     if grep -qE "^[^#].*\s/\s.*noatime" "$fstab_file"; then
         log_skip "Root filesystem already has noatime"
     else
@@ -295,12 +295,21 @@ optimize_storage() {
     # 1b. Root commit option for ext4 to reduce writeback latency (if root is ext4)
     # Check if root filesystem is ext4 in fstab
     if grep -qE "^[^#].*\s/\s+ext4" "$fstab_file"; then
-        if grep -qE "^[^#].*\s/\s+ext4\s+\S*commit=" "$fstab_file"; then
-            log_skip "Root filesystem already has commit configured"
+        if grep -qE "^[^#].*\s/\s+ext4\s+\S*commit=60" "$fstab_file" && grep -qE "^[^#].*\s/\s+ext4\s+\S*lazytime" "$fstab_file"; then
+            log_skip "Root filesystem already has commit=60 and lazytime"
         else
-            log_info "Adding commit=10 to root filesystem..."
-            sed -i -E 's/^([^#]\S+\s+\/\s+ext4\s+)(\S+)/\1\2,commit=10/' "$fstab_file"
-            log_pass "Root filesystem optimized: commit=10"
+            log_info "Adding commit=60,lazytime to root filesystem..."
+            # Check if any commit option exists, modify it.
+            if grep -qE "^[^#].*\s/\s+ext4\s+\S*commit=" "$fstab_file"; then
+                sed -i -E 's/commit=[0-9]+/commit=60/' "$fstab_file"
+            else
+                sed -i -E 's/^([^#]\S+\s+\/\s+ext4\s+)(\S+)/\1\2,commit=60/' "$fstab_file"
+            fi
+            # Check if lazytime exists, if not, append it
+            if ! grep -qE "^[^#].*\s/\s+ext4\s+\S*lazytime" "$fstab_file"; then
+                sed -i -E 's/^([^#]\S+\s+\/\s+ext4\s+)(\S+)/\1\2,lazytime/' "$fstab_file"
+            fi
+            log_pass "Root filesystem optimized: commit=60,lazytime"
         fi
     fi
 
@@ -409,7 +418,7 @@ net.core.netdev_max_backlog=5000
 net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 net.ipv4.tcp_rmem=4096 87380 16777216
-net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_wmem=4096 87380 16777216
 net.ipv4.tcp_max_syn_backlog=4096
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_tw_reuse=1
@@ -452,6 +461,14 @@ EOF
     if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
         echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || true
         log_pass "MGLRU thrashing threshold optimized"
+        
+        # Persist MGLRU min_ttl_ms via tmpfiles.d
+        local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
+        mkdir -p /etc/tmpfiles.d
+        if [[ ! -f "$tmpfiles_conf" ]] || ! grep -q "lru_gen/min_ttl_ms" "$tmpfiles_conf"; then
+            echo "w /sys/kernel/mm/lru_gen/min_ttl_ms - - - - 1000" >> "$tmpfiles_conf"
+            log_pass "MGLRU thrashing threshold persistence configured"
+        fi
     fi
 
     # Ensure br_netfilter loads at boot (required for Docker bridge sysctl settings)
@@ -468,7 +485,8 @@ EOF
     # Apply all sysctl configs
     sysctl --system > /dev/null 2>&1
 
-    # APST Sleep Workaround to prevent NVMe drive lockups/disconnects
+    # PCIe ASPM & APST Sleep Workarounds to prevent NVMe drive lockups/disconnects
+    add_cmdline_param "pcie_aspm=off"
     add_cmdline_param "nvme_core.default_ps_max_latency_us=0"
 }
 
@@ -984,6 +1002,14 @@ EOF
     if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
         echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled
         log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
+        
+        # Persist THP via tmpfiles.d
+        local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
+        mkdir -p /etc/tmpfiles.d
+        if [[ ! -f "$tmpfiles_conf" ]] || ! grep -q "transparent_hugepage/enabled" "$tmpfiles_conf"; then
+            echo "w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise" >> "$tmpfiles_conf"
+            log_pass "THP persistence configured"
+        fi
     fi
 
     # 4. Continuous Flash Media Protection (Hourly Swap Enforcer)
@@ -1286,18 +1312,48 @@ optimize_eeprom() {
         log_info "Adding PCIE_PROBE=1 to EEPROM config"
     fi
 
-    # Ensure BOOT_ORDER has NVMe priority (ends with 6)
+    # Ensure BOOT_ORDER is 0xf416 (prioritizes NVMe boot, bypasses USB checks on fallback)
     if ! grep -q "^BOOT_ORDER=" "$new_config_file"; then
-        echo "BOOT_ORDER=0xf146" >> "$new_config_file"
+        echo "BOOT_ORDER=0xf416" >> "$new_config_file"
         need_update=true
-        log_info "Setting BOOT_ORDER=0xf146 in EEPROM config"
+        log_info "Setting BOOT_ORDER=0xf416 in EEPROM config"
     else
         local current_order
         current_order=$(grep "^BOOT_ORDER=" "$new_config_file" | cut -d= -f2)
-        if [[ ! "$current_order" =~ 6$ ]]; then
-            sed -i 's/^BOOT_ORDER=.*/BOOT_ORDER=0xf146/' "$new_config_file"
+        if [[ "$current_order" != "0xf416" ]]; then
+            sed -i 's/^BOOT_ORDER=.*/BOOT_ORDER=0xf416/' "$new_config_file"
             need_update=true
-            log_info "Updating BOOT_ORDER to 0xf146 to prioritize NVMe boot"
+            log_info "Updating BOOT_ORDER to 0xf416 to prioritize NVMe boot"
+        fi
+    fi
+
+    # Ensure POWER_OFF_ON_HALT=1 to minimize idle wattage
+    if ! grep -q "^POWER_OFF_ON_HALT=" "$new_config_file"; then
+        echo "POWER_OFF_ON_HALT=1" >> "$new_config_file"
+        need_update=true
+        log_info "Adding POWER_OFF_ON_HALT=1 to EEPROM config"
+    else
+        local current_poh
+        current_poh=$(grep "^POWER_OFF_ON_HALT=" "$new_config_file" | cut -d= -f2)
+        if [[ "$current_poh" != "1" ]]; then
+            sed -i 's/^POWER_OFF_ON_HALT=.*/POWER_OFF_ON_HALT=1/' "$new_config_file"
+            need_update=true
+            log_info "Updating POWER_OFF_ON_HALT to 1 in EEPROM config"
+        fi
+    fi
+
+    # Ensure BOOT_UART=1 to preserve components when halted
+    if ! grep -q "^BOOT_UART=" "$new_config_file"; then
+        echo "BOOT_UART=1" >> "$new_config_file"
+        need_update=true
+        log_info "Adding BOOT_UART=1 to EEPROM config"
+    else
+        local current_bu
+        current_bu=$(grep "^BOOT_UART=" "$new_config_file" | cut -d= -f2)
+        if [[ "$current_bu" != "1" ]]; then
+            sed -i 's/^BOOT_UART=.*/BOOT_UART=1/' "$new_config_file"
+            need_update=true
+            log_info "Updating BOOT_UART to 1 in EEPROM config"
         fi
     fi
 

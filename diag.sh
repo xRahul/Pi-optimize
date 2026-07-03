@@ -279,10 +279,24 @@ check_hardware() {
         local cmdline_content
         cmdline_content=$(cat "$cmdline_file" 2>/dev/null || echo "")
         
+        local has_aspm=0
+        local has_apst=0
+        if echo "$cmdline_content" | grep -q "pcie_aspm=off"; then
+            has_aspm=1
+        fi
         if echo "$cmdline_content" | grep -q "nvme_core.default_ps_max_latency_us=0"; then
-            report_pass "Kernel Cmdline: APST sleep workaround active"
+            has_apst=1
+        fi
+
+        if [[ $has_aspm -eq 1 && $has_apst -eq 1 ]]; then
+            report_pass "Kernel Cmdline: PCIe ASPM & APST sleep workarounds active"
         else
-            report_warn "Kernel Cmdline: nvme_core.default_ps_max_latency_us=0 is missing" "Run optimize.sh to prevent NVMe dropouts."
+            if [[ $has_aspm -eq 0 ]]; then
+                report_warn "Kernel Cmdline: pcie_aspm=off is missing" "Run optimize.sh to prevent NVMe PCIe disconnects."
+            fi
+            if [[ $has_apst -eq 0 ]]; then
+                report_warn "Kernel Cmdline: nvme_core.default_ps_max_latency_us=0 is missing" "Run optimize.sh to prevent NVMe APST dropouts."
+            fi
         fi
     fi
 
@@ -293,16 +307,28 @@ check_hardware() {
         if [[ -n "$eeprom_conf" ]]; then
             local boot_order
             boot_order=$(echo "$eeprom_conf" | grep "^BOOT_ORDER=" | cut -d= -f2 || echo "")
-            if [[ "$boot_order" =~ 6$ ]]; then
-                report_pass "EEPROM Config: Boot order prioritizes NVMe ($boot_order)"
+            if [[ "$boot_order" == "0xf416" ]]; then
+                report_pass "EEPROM Config: Boot order is optimal ($boot_order)"
             else
-                report_warn "EEPROM Config: Boot order ($boot_order) does not prioritize NVMe" "Run optimize.sh to set BOOT_ORDER=0xf146."
+                report_warn "EEPROM Config: Boot order ($boot_order) is not optimal" "Run optimize.sh to set BOOT_ORDER=0xf416 (NVMe priority with clean USB fallback)."
             fi
             
             if echo "$eeprom_conf" | grep -q "^PCIE_PROBE=1"; then
                 report_pass "EEPROM Config: PCIE_PROBE=1 is configured"
             else
                 report_warn "EEPROM Config: PCIE_PROBE=1 is missing" "Run optimize.sh to force PCIe probing."
+            fi
+
+            if echo "$eeprom_conf" | grep -q "^POWER_OFF_ON_HALT=1"; then
+                report_pass "EEPROM Config: POWER_OFF_ON_HALT=1 is configured"
+            else
+                report_warn "EEPROM Config: POWER_OFF_ON_HALT=1 is missing" "Run optimize.sh to minimize idle power consumption."
+            fi
+
+            if echo "$eeprom_conf" | grep -q "^BOOT_UART=1"; then
+                report_pass "EEPROM Config: BOOT_UART=1 is configured"
+            else
+                report_warn "EEPROM Config: BOOT_UART=1 is missing" "Run optimize.sh to reduce halt power draw."
             fi
         fi
     fi
@@ -455,6 +481,19 @@ check_resources() {
         report_info "THP: Not available in this kernel (Standard for RPi)"
     fi
 
+    # Multi-Gen LRU (MGLRU)
+    if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
+        if [[ -f /sys/kernel/mm/lru_gen/min_ttl_ms ]]; then
+            local ttl
+            ttl=$(cat /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || echo "0")
+            if [[ "$ttl" -eq 1000 ]]; then
+                report_pass "MGLRU: thrashing threshold set to 1000ms (Optimal)"
+            else
+                report_warn "MGLRU: thrashing threshold set to ${ttl}ms" "Run optimize.sh to set to 1000ms for stable database caching."
+            fi
+        fi
+    fi
+
     # Tmpfs /tmp
     if findmnt -n -o FSTYPE --target /tmp | grep -q "tmpfs"; then
         report_pass "/tmp: Using tmpfs (Flash-friendly)"
@@ -528,10 +567,10 @@ check_storage() {
         report_warn "Root Mount Option: noatime MISSING" "Run optimize.sh to optimize root partition."
     fi
     if [[ "$root_fs_type" == "ext4" ]]; then
-        if [[ "$root_fs_opts" == *"commit="* ]]; then
-            report_pass "Root Mount Option: commit interval adjusted ($root_fs_opts)"
+        if [[ "$root_fs_opts" == *"commit=60"* && "$root_fs_opts" == *"lazytime"* ]]; then
+            report_pass "Root Mount Option: commit=60 and lazytime active ($root_fs_opts)"
         else
-            report_warn "Root Mount Option: commit interval default" "Run optimize.sh to set commit=10."
+            report_warn "Root Mount Option: commit/lazytime not optimal" "Run optimize.sh to set commit=60,lazytime."
         fi
     fi
 
@@ -807,6 +846,24 @@ check_network() {
         else
             report_fail "Connectivity: n8n CANNOT reach Ollama" "Check firewall rules or Ollama bind address."
         fi
+    fi
+
+    # Kernel Network Buffer and Congestion Control Optimizations
+    local rmem wmem cc
+    rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
+    wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "0")
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
+    
+    if [ "$rmem" -ge 16777216 ] && [ "$wmem" -ge 16777216 ]; then
+        report_pass "Kernel Network Buffers: Optimized (rmem/wmem >= 16MB)"
+    else
+        report_warn "Kernel Network Buffers: Default sizes (rmem: $rmem, wmem: $wmem)" "Run optimize.sh to increase socket buffers for WireGuard/Tailscale throughput."
+    fi
+    
+    if [ "$cc" == "bbr" ]; then
+        report_pass "TCP Congestion Control: BBR (Optimal)"
+    else
+        report_warn "TCP Congestion Control: $cc" "Run optimize.sh to enable BBR congestion control."
     fi
 
     # SSH

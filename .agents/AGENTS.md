@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-The **Raspberry Pi Home Server Optimization Suite (v4.3.0)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host. 
+The **Raspberry Pi Home Server Optimization Suite (v4.4.0)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host. 
 
 ## Gemini CLI "Pro" Setup (Optimization)
 
 The Gemini CLI has been optimized for this environment with the following enhancements:
 
 ### 1. Model Context Protocol (MCP) Servers
-- **Filesystem**: Direct access to `/home/rahul/scripts` and `/mnt/usb`.
+- **Filesystem**: Direct access to `/home/<user>/scripts` and `/mnt/usb`.
 - **Git**: Local Git operations (status, diff, log, commit).
 - **Docker**: Container monitoring and management via local daemon.
 
@@ -27,7 +27,7 @@ The Gemini CLI has been optimized for this environment with the following enhanc
 
 *   **Idempotency & Reliability:** Scripts can be safely run multiple times. Includes lock files and trap handlers.
 *   **Performance:** Configures CPU governor to `performance`, aggressive cooling fan curves, and BBR network congestion control.
-*   **Flash Longevity:** Disables disk-based swap (uses ZRAM), sets up `noatime` mounts, RAM-based logging (`busybox-syslogd`), and volatile journald to reduce SD card/USB wear.
+*   **Flash Longevity:** Disables disk-based swap (uses ZRAM by default), sets up `noatime` mounts, RAM-based logging (`busybox-syslogd`), and volatile journald to reduce SD card/USB wear. On NVMe systems, configures a static SSD swapfile for memory overflow.
 *   **Security:** Integrated UFW firewall management and kernel hardening.
 *   **Storage Optimization:** BFQ I/O scheduler and optimized USB auto-mounting for Docker data.
 

@@ -16,10 +16,10 @@ You are a specialized agent for managing the Raspberry Pi 5 Home Server environm
 - **Flash Protection**: Always prefer RAM-based logging and ZRAM swap.
 - **Root Privileges**: Use `sudo` for all administrative tasks.
 - **Idempotency**: Verify system state before applying changes.
-- **Docker Management**: Utilize the Docker MCP to monitor container health and resource usage.
+- **Docker Management**: Utilize the Docker MCP (or standard Docker commands) to monitor container health and resource usage.
 
 ## Contextual Knowledge
-- Workspace: `/home/rahul/scripts`
-- Docker Home: `/home/rahul/docker` (proxied by Caddy)
+- Workspace: `/home/<user>/scripts`
+- Docker Home: `/home/<user>/docker` (proxied by reverse proxy)
 - Storage: `/mnt/usb` (Primary data mount)
-- Network: `10.8.1.0/24` (Static IP subnet)
+- Network: `10.8.1.0/24` (Private Docker subnet)
