@@ -97,7 +97,7 @@ get_target_user() {
     local target_user="${SUDO_USER:-}"
     if [[ -z "$target_user" ]]; then
         target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
-        log_warn "SUDO_USER not set. Defaulting to user: $target_user"
+        log_warn "SUDO_USER not set. Defaulting to user: $target_user" >&2
     fi
     echo "$target_user"
 }

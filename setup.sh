@@ -624,6 +624,58 @@ EOF
     fi
 }
 
+configure_syncthing() {
+    log_section "SYNCTHING CONTROL CONFIGURATION"
+    local target_user
+    target_user=$(get_target_user)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
+
+    # Disable systemd user service autostart for target_user
+    log_info "Disabling Syncthing systemd user service autostart..."
+    if command_exists systemctl; then
+        # Disable globally for systemd user scope so new/all sessions don't trigger it automatically
+        systemctl --global disable syncthing.service 2>/dev/null || true
+        # Disable for current target_user specifically
+        sudo -u "$target_user" XDG_RUNTIME_DIR="/run/user/$(id -u "$target_user")" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$target_user")/bus" systemctl --user disable syncthing.service 2>/dev/null || true
+        log_pass "Syncthing autostart disabled (running instances left active)"
+    fi
+
+    # Create start script
+    local start_script="${target_home}/start_syncthing.sh"
+    log_info "Creating start_syncthing.sh..."
+    cat > "$start_script" << 'EOF'
+#!/bin/bash
+systemctl --user start syncthing.service
+if systemctl --user is-active --quiet syncthing.service; then
+    echo "Syncthing service started successfully."
+else
+    echo "Failed to start Syncthing service."
+    exit 1
+fi
+EOF
+    chmod +x "$start_script"
+    chown "$target_user:$target_user" "$start_script"
+    log_pass "Created $start_script"
+
+    # Create stop script
+    local stop_script="${target_home}/stop_syncthing.sh"
+    log_info "Creating stop_syncthing.sh..."
+    cat > "$stop_script" << 'EOF'
+#!/bin/bash
+systemctl --user stop syncthing.service
+if ! systemctl --user is-active --quiet syncthing.service; then
+    echo "Syncthing service stopped successfully."
+else
+    echo "Failed to stop Syncthing service."
+    exit 1
+fi
+EOF
+    chmod +x "$stop_script"
+    chown "$target_user:$target_user" "$stop_script"
+    log_pass "Created $stop_script"
+}
+
 ################################################################################
 # Main
 ################################################################################
@@ -674,6 +726,7 @@ main() {
     install_zsh_suite
     usb_optimization
     install_ollama
+    configure_syncthing
     
     # Post-setup verification and reload
     if systemctl daemon-reload 2>/dev/null; then

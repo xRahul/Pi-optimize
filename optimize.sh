@@ -1549,6 +1549,25 @@ EOF
     fi
 }
 
+optimize_syncthing_autostart() {
+    log_section "SYNCTHING AUTOSTART OPTIMIZATION"
+    local target_user
+    target_user=$(get_target_user)
+
+    if command_exists systemctl; then
+        log_info "Disabling Syncthing systemd user service autostart..."
+        # Globally disable user service so no users autostart it on login
+        systemctl --global disable syncthing.service 2>/dev/null || true
+        # Disable specifically for target_user
+        sudo -u "$target_user" XDG_RUNTIME_DIR="/run/user/$(id -u "$target_user")" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$target_user")/bus" systemctl --user disable syncthing.service 2>/dev/null || true
+        log_pass "Syncthing autostart disabled (running instances left active)"
+        ((OPTIMIZATIONS_APPLIED++))
+    else
+        log_skip "systemctl not available, skipping Syncthing autostart optimization"
+        ((OPTIMIZATIONS_SKIPPED++))
+    fi
+}
+
 ################################################################################
 # 9. Maintenance & Security
 ################################################################################
@@ -1694,6 +1713,7 @@ main() {
     optimize_logs
     optimize_smartd
     optimize_ollama_service
+    optimize_syncthing_autostart
     optimize_eeprom
     optimize_zsh
     system_maintenance

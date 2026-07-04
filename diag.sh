@@ -1053,6 +1053,22 @@ check_system_services() {
         else
             report_info "Tooling: Antigravity CLI (agy) not installed"
         fi
+
+        # Syncthing check
+        local syncthing_start="${target_home}/start_syncthing.sh"
+        local syncthing_stop="${target_home}/stop_syncthing.sh"
+        if [[ -f "$syncthing_start" ]] && [[ -f "$syncthing_stop" ]]; then
+            report_pass "Syncthing: Control scripts present in home directory"
+        else
+            report_warn "Syncthing: Control scripts missing or incomplete in home directory" "Run setup.sh to create them."
+        fi
+
+        if systemctl --global is-enabled syncthing.service >/dev/null 2>&1 || \
+           sudo -u "$target_user" XDG_RUNTIME_DIR="/run/user/$(id -u "$target_user")" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$target_user")/bus" systemctl --user is-enabled syncthing.service >/dev/null 2>&1; then
+            report_warn "Syncthing: Autostart is currently ENABLED" "Disable it with setup.sh/optimize.sh to prevent resource use on boot."
+        else
+            report_pass "Syncthing: Autostart disabled as expected"
+        fi
     fi
 }
 
