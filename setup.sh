@@ -21,7 +21,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.4.0"
+SCRIPT_VERSION="4.6.0"
 # shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
 BOOT_TRAN=""
@@ -55,14 +55,7 @@ wait_for_apt_lock() {
     done
 }
 
-get_target_user() {
-    local target_user="${SUDO_USER:-}"
-    if [[ -z "$target_user" ]]; then
-        target_user=$(id -nu 1000 2>/dev/null || echo "$USER")
-        log_warn "SUDO_USER not set. Defaulting to user: $target_user"
-    fi
-    echo "$target_user"
-}
+# Target user is now resolved via get_target_user in lib/utils.sh
 
 ################################################################################
 # 1. Pre-flight Checks
@@ -126,7 +119,7 @@ system_core() {
         "usbutils" "util-linux" "watchdog" "e2fsprogs" 
         "smartmontools" "cpufrequtils" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
-        "bats"
+        "bats" "network-manager" "ethtool" "zsh"
     )
     if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
         packages+=("rsyslog" "nvme-cli")
@@ -401,6 +394,167 @@ install_uv_tooling() {
 }
 
 ################################################################################
+# 6. Zsh & Oh My Zsh Suite
+################################################################################
+
+install_zsh_suite() {
+    log_section "ZSH & OH MY ZSH SUITE"
+
+    local target_user
+    target_user=$(get_target_user)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
+
+    # 1. Ensure Zsh package is installed
+    if ! command_exists zsh; then
+        log_info "Installing Zsh..."
+        wait_for_apt_lock
+        apt-get install -y zsh || log_error "Failed to install Zsh"
+    else
+        log_skip "Zsh already installed"
+    fi
+
+    # 2. Oh My Zsh installation
+    local omz_dir="${target_home}/.oh-my-zsh"
+    if [[ -d "$omz_dir" ]]; then
+        log_skip "Oh My Zsh already installed at $omz_dir"
+    else
+        log_info "Installing Oh My Zsh for user $target_user..."
+        if sudo -u "$target_user" RUNZSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended; then
+            log_pass "Oh My Zsh installed successfully"
+        else
+            log_warn "Oh My Zsh installation failed"
+        fi
+    fi
+
+    # 3. Custom plugins installation
+    local custom_plugin_dir="${omz_dir}/custom/plugins"
+    mkdir -p "$custom_plugin_dir"
+    chown "$target_user:$target_user" "$custom_plugin_dir"
+
+    # Clone zsh-syntax-highlighting
+    if [[ -d "${custom_plugin_dir}/zsh-syntax-highlighting" ]]; then
+        log_skip "zsh-syntax-highlighting already installed"
+    else
+        log_info "Cloning zsh-syntax-highlighting..."
+        if sudo -u "$target_user" git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "${custom_plugin_dir}/zsh-syntax-highlighting"; then
+            log_pass "zsh-syntax-highlighting cloned"
+        else
+            log_warn "Failed to clone zsh-syntax-highlighting"
+        fi
+    fi
+
+    # Clone zsh-autosuggestions
+    if [[ -d "${custom_plugin_dir}/zsh-autosuggestions" ]]; then
+        log_skip "zsh-autosuggestions already installed"
+    else
+        log_info "Cloning zsh-autosuggestions..."
+        if sudo -u "$target_user" git clone https://github.com/zsh-users/zsh-autosuggestions "${custom_plugin_dir}/zsh-autosuggestions"; then
+            log_pass "zsh-autosuggestions cloned"
+        else
+            log_warn "Failed to clone zsh-autosuggestions"
+        fi
+    fi
+
+    # 4. Write custom .zshrc
+    local zshrc_file="${target_home}/.zshrc"
+    if [[ -f "$zshrc_file" ]]; then
+        log_info "Backing up existing .zshrc to .zshrc.bak..."
+        backup_file "$zshrc_file"
+    fi
+
+    log_info "Writing custom .zshrc configuration..."
+    cat > "$zshrc_file" << 'EOF'
+# Keep lengthy history
+HISTSIZE=100000
+SAVEHIST=100000
+HISTFILE=~/.zsh_history
+
+# Write commands to history immediately and share across sessions
+setopt INC_APPEND_HISTORY
+setopt SHARE_HISTORY
+
+# Path to your Oh My Zsh installation.
+export ZSH="$HOME/.oh-my-zsh"
+
+ZSH_THEME="amuse"
+
+# Disable automatic update checks (optimize.sh sets this, setup.sh sets default reminder)
+zstyle ':omz:update' mode reminder
+
+# Custom plugins list
+plugins=(git nvm node npm sudo colored-man-pages history zsh-autosuggestions zsh-syntax-highlighting)
+
+source $ZSH/oh-my-zsh.sh
+
+# User configuration
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
+
+# Node global prefix path (added during setup)
+export PATH="$HOME/.npm-global/bin:$PATH"
+
+# Environment variables
+export NVM_DIR="$HOME/.nvm"
+export COLORTERM=truecolor
+export TERM=xterm-256color
+
+# Android SDK & Java 21
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export ANDROID_HOME=$HOME/android-sdk
+export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin
+export PATH="$PATH:$HOME/flutter/bin"
+
+# Added by Antigravity CLI installer
+export PATH="/home/rahul/.local/bin:$PATH"
+
+alias pbcopy='clip.exe'
+alias pbpaste='powershell.exe -Command "Get-Clipboard" | tr -d "\r"'
+
+# Antigravity CLI Verbose & Debug Config
+export OPENCODE_ANTIGRAVITY_DEBUG=2
+export DEBUG=1
+export VERBOSE=1
+
+# bun completions
+[ -s "$HOME/.bun/_bun" ] && source "$HOME/.bun/_bun"
+
+# bun
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+export SYSTEMD_EDITOR=vim
+
+# >>> tokless path >>>
+# Adds tokless tool bin dirs to PATH (rtk, bun, cargo).
+for d in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin"; do
+  [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$PATH:$d" ;; esac
+done
+export PATH
+# <<< tokless path <<<
+
+export ANTHROPIC_BASE_URL=http://localhost:11434
+export ANTHROPIC_AUTH_TOKEN=ollama
+export ANTHROPIC_API_KEY=""
+EOF
+
+    chown "$target_user:$target_user" "$zshrc_file"
+    log_pass ".zshrc successfully written and owned by $target_user"
+
+    # 5. Change default shell to Zsh for target user
+    local current_shell
+    current_shell=$(getent passwd "$target_user" | cut -d: -f7)
+    if [[ "$current_shell" != *"/zsh" ]]; then
+        log_info "Changing default shell to Zsh for $target_user..."
+        if chsh -s /bin/zsh "$target_user"; then
+            log_pass "Default shell changed to /bin/zsh"
+        else
+            log_warn "Failed to change shell using chsh"
+        fi
+    else
+        log_skip "Zsh is already the default shell"
+    fi
+}
+
+################################################################################
 # 7. USB & Optimization
 ################################################################################
 
@@ -517,6 +671,7 @@ main() {
     docker_suite
     nodejs_tooling
     install_uv_tooling
+    install_zsh_suite
     usb_optimization
     install_ollama
     

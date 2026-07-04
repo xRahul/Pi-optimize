@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The **Raspberry Pi Home Server Optimization Suite (v4.4.0)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host. 
+The **Raspberry Pi Home Server Optimization Suite (v4.6.0)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host. 
 
 ## Gemini CLI "Pro" Setup (Optimization)
 

@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.4.0"
+SCRIPT_VERSION="4.6.0"
 LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
@@ -428,8 +428,9 @@ check_resources() {
     local boot_dev
     boot_dev=$(findmnt -n -o SOURCE / 2>/dev/null)
     local boot_disk
-    boot_disk=$(lsblk -nd -o PKNAME "$boot_dev" 2>/dev/null || echo "$boot_dev")
+    boot_disk=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null || echo "$boot_dev")
     [[ -z "$boot_disk" ]] && boot_disk="$boot_dev"
+    [[ "$boot_disk" != /dev/* ]] && boot_disk="/dev/$boot_disk"
     local boot_tran
     boot_tran=$(lsblk -nd -o TRAN "$boot_disk" 2>/dev/null)
     [[ "$boot_tran" == "nvme" ]] && boot_is_nvme=1
@@ -821,6 +822,50 @@ check_network() {
         fi
     fi
 
+    # Wi-Fi Auto-Toggle Dispatcher
+    local dispatcher_script="/etc/NetworkManager/dispatcher.d/99-wifi-auto-toggle.sh"
+    if [[ -f "$dispatcher_script" ]]; then
+        if [[ -x "$dispatcher_script" ]]; then
+            report_pass "Wi-Fi Auto-Toggle: Script installed and executable"
+            
+            # Verify correctness of current state
+            # Determine if ethernet has internet
+            local eth_active=false
+            local eth_devices
+            if command_exists nmcli; then
+                eth_devices=$(nmcli -t -f DEVICE,TYPE,STATE device | grep -E '^[^:]+:ethernet:connected' | cut -d: -f1 || true)
+                for dev in $eth_devices; do
+                    if ping -c 1 -W 2 -I "$dev" 1.1.1.1 >/dev/null 2>&1; then
+                        eth_active=true
+                        break
+                    fi
+                done
+                
+                local wifi_state
+                wifi_state=$(nmcli radio wifi)
+                if [[ "$eth_active" == "true" ]]; then
+                    if [[ "$wifi_state" == "disabled" ]]; then
+                        report_pass "Wi-Fi Auto-Toggle Status: Correctly disabled (Ethernet internet active)"
+                    else
+                        report_warn "Wi-Fi Auto-Toggle Status: Wi-Fi is enabled but Ethernet internet is active" "Check dispatcher script logs or run optimize.sh to apply."
+                    fi
+                else
+                    if [[ "$wifi_state" == "enabled" ]]; then
+                        report_pass "Wi-Fi Auto-Toggle Status: Correctly enabled (No Ethernet internet)"
+                    else
+                        report_warn "Wi-Fi Auto-Toggle Status: Wi-Fi is disabled but no active Ethernet internet detected" "Check dispatcher script logs."
+                    fi
+                fi
+            else
+                report_warn "Wi-Fi Auto-Toggle: nmcli command missing" "Cannot verify radio state."
+            fi
+        else
+            report_fail "Wi-Fi Auto-Toggle: Script exists but is NOT executable" "Run chmod +x $dispatcher_script"
+        fi
+    else
+        report_info "Wi-Fi Auto-Toggle: Dynamic toggle script not configured"
+    fi
+
     # Firewall
     if command_exists ufw; then
         local ufw_status
@@ -864,6 +909,39 @@ check_network() {
         report_pass "TCP Congestion Control: BBR (Optimal)"
     else
         report_warn "TCP Congestion Control: $cc" "Run optimize.sh to enable BBR congestion control."
+    fi
+
+    # UDP GRO Forwarding (Host)
+    if command_exists ethtool; then
+        local gro_ok=true
+        local checked_ifaces=()
+        for iface in eth0 wlan0; do
+            if [[ -d "/sys/class/net/$iface" ]]; then
+                checked_ifaces+=("$iface")
+                if ! ethtool -k "$iface" 2>/dev/null | grep -q "rx-udp-gro-forwarding: on"; then
+                    gro_ok=false
+                fi
+            fi
+        done
+        
+        if [[ ${#checked_ifaces[@]} -eq 0 ]]; then
+            report_info "UDP GRO Forwarding: No eth0/wlan0 interfaces found to check"
+        elif [[ "$gro_ok" == "true" ]]; then
+            report_pass "Host UDP GRO Forwarding: Enabled on ${checked_ifaces[*]}"
+        else
+            report_warn "Host UDP GRO Forwarding: Disabled or suboptimal" "Run optimize.sh to optimize host interfaces for Tailscale throughput."
+        fi
+    else
+        report_warn "Host UDP GRO: ethtool missing" "Install ethtool using setup.sh."
+    fi
+
+    # UDP GRO Forwarding (Tailscale Container)
+    if command_exists docker && [[ -n "$(docker ps -q -f 'name=^tailscale$')" ]]; then
+        if docker exec tailscale ethtool -k eth0 2>/dev/null | grep -q "rx-udp-gro-forwarding: on"; then
+            report_pass "Tailscale UDP GRO Forwarding: Enabled inside container namespace"
+        else
+            report_fail "Tailscale UDP GRO Forwarding: Disabled or suboptimal inside container namespace" "Check entrypoint configuration in docker-compose.yml."
+        fi
     fi
 
     # SSH
@@ -979,6 +1057,103 @@ check_system_services() {
     fi
 }
 
+check_zsh_suite() {
+    log_section_diag "ZSH & OH MY ZSH SUITE"
+
+    local target_user
+    target_user=$(get_target_user)
+
+    if [[ -z "$target_user" ]]; then
+        report_warn "Zsh Suite: Target user could not be determined"
+        return
+    fi
+
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
+
+    # 1. Zsh installation
+    if command_exists zsh; then
+        local zsh_ver
+        zsh_ver=$(zsh --version | awk '{print $2}')
+        report_pass "Zsh: Installed ($zsh_ver)"
+    else
+        report_fail "Zsh: NOT INSTALLED" "Run setup.sh to install Zsh."
+        return
+    fi
+
+    # 2. Target user's default shell
+    local user_shell
+    user_shell=$(getent passwd "$target_user" | cut -d: -f7)
+    if [[ "$user_shell" == *"/zsh" ]]; then
+        report_pass "Shell: Zsh is default shell for $target_user ($user_shell)"
+    else
+        report_warn "Shell: Zsh is NOT default shell for $target_user (currently $user_shell)" "Run chsh -s /bin/zsh $target_user."
+    fi
+
+    # 3. Oh My Zsh
+    local omz_dir="${target_home}/.oh-my-zsh"
+    if [[ -d "$omz_dir" ]]; then
+        report_pass "Oh My Zsh: Installed at $omz_dir"
+    else
+        report_warn "Oh My Zsh: NOT INSTALLED" "Run setup.sh to install Oh My Zsh."
+    fi
+
+    # 4. .zshrc configuration
+    local zshrc="${target_home}/.zshrc"
+    if [[ -f "$zshrc" ]]; then
+        report_pass ".zshrc: Found for user $target_user"
+        
+        # Verify custom plugins
+        local missing_plugins=()
+        local plugins=(
+            "zsh-autosuggestions"
+            "zsh-syntax-highlighting"
+        )
+        for plugin in "${plugins[@]}"; do
+            if [[ ! -d "${omz_dir}/custom/plugins/${plugin}" ]]; then
+                missing_plugins+=("$plugin")
+            fi
+        done
+
+        if [ ${#missing_plugins[@]} -eq 0 ]; then
+            report_pass "Plugins: Custom plugins installed (syntax-highlighting, autosuggestions)"
+        else
+            report_warn "Plugins: Missing custom plugins (${missing_plugins[*]})" "Run setup.sh to download missing custom plugins."
+        fi
+        
+        # Check if compiled .zshrc.zwc exists
+        if [[ -f "${zshrc}.zwc" ]]; then
+            report_pass "Optimization: .zshrc is compiled (.zshrc.zwc)"
+        else
+            report_warn "Optimization: .zshrc is NOT compiled" "Run optimize.sh to compile Zsh files."
+        fi
+    else
+        report_warn ".zshrc: Missing for user $target_user" "Run setup.sh to provision .zshrc."
+    fi
+
+    # 5. Measure Shell Startup Time
+    report_info "Measuring Zsh startup speed..."
+    
+    local start_time
+    start_time=$(date +%s%N)
+    # Run zsh in interactive login mode and exit
+    sudo -u "$target_user" zsh -i -c exit >/dev/null 2>&1
+    local end_time
+    end_time=$(date +%s%N)
+    
+    # Calculate difference
+    local diff=$((end_time - start_time))
+    local diff_ms=$((diff / 1000000))
+    
+    if [ "$diff_ms" -lt 300 ]; then
+        report_pass "Zsh Speed: Startup time is ${diff_ms}ms (excellent)"
+    elif [ "$diff_ms" -lt 700 ]; then
+        report_pass "Zsh Speed: Startup time is ${diff_ms}ms (acceptable)"
+    else
+        report_warn "Zsh Speed: Startup time is ${diff_ms}ms (slow)" "Profile .zshrc or check plugin load delays."
+    fi
+}
+
 ################################################################################
 # Main
 ################################################################################
@@ -992,6 +1167,7 @@ main() {
     check_docker
     check_network
     check_system_services
+    check_zsh_suite
 
     log_section_diag "DIAGNOSTIC SUMMARY"
     

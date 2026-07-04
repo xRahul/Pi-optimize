@@ -1,4 +1,4 @@
-# 🥧 Raspberry Pi Home Server Optimization Suite (v4.4.0)
+# 🥧 Raspberry Pi Home Server Optimization Suite (v4.6.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Pi 5](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red.svg)]()
@@ -8,7 +8,7 @@ A "Pro Edition" automation suite designed exclusively for the **Raspberry Pi 5**
 
 ---
 
-## 🚀 The "Ultimate Edition" (v4.4.0)
+## 🚀 The "Ultimate Edition" (v4.6.0)
 
 This suite is not just a collection of scripts; it's a comprehensive system state management tool. It prioritizes **Flash Longevity**, **IO Performance**, and **System Stability**.
 

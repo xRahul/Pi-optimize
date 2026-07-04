@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.4.0"
+SCRIPT_VERSION="4.6.0"
 CONFIG_FILE="/boot/firmware/config.txt"
 export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
@@ -172,32 +172,83 @@ EOF
         log_pass "dtparam=audio=off enabled (existing audio=on commented out)"
     fi
 
-    # Smart Wi-Fi Disablement
-    local wifi_active=false
-    if command_exists ip; then
-        if ip -4 addr show wlan0 2>/dev/null | grep -q "inet "; then
-            wifi_active=true
-        fi
+    # Comment out any existing disable-wifi in config.txt to ensure Wi-Fi hardware is visible to the system
+    if grep -q "^dtoverlay=disable-wifi" "$CONFIG_FILE"; then
+        sed -i 's/^dtoverlay=disable-wifi/# dtoverlay=disable-wifi  # Commented out by optimize.sh for dynamic auto-toggle/' "$CONFIG_FILE"
+        log_pass "Removed permanent Wi-Fi disablement to allow dynamic auto-toggle"
     fi
 
-    if [[ "$wifi_active" == "false" ]]; then
-        local eth_active=false
-        if ip -4 addr show eth0 2>/dev/null | grep -q "inet " || ip -4 addr show end0 2>/dev/null | grep -q "inet "; then
-            eth_active=true
+    # Dynamic Wi-Fi Auto-Toggle (NetworkManager dispatcher)
+    log_info "Configuring dynamic Wi-Fi auto-toggle..."
+    local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
+    local dispatcher_script="${dispatcher_dir}/99-wifi-auto-toggle.sh"
+
+    if [[ -d "$dispatcher_dir" ]]; then
+        cat << 'EOF' > "$dispatcher_script"
+#!/bin/bash
+# NetworkManager dispatcher script to auto-toggle Wi-Fi based on Ethernet connectivity.
+
+INTERFACE="$1"
+ACTION="$2"
+
+# Only run on up, down, or connectivity changes
+if [[ "$ACTION" != "up" && "$ACTION" != "down" && "$ACTION" != "connectivity-change" ]]; then
+    exit 0
+fi
+
+check_ethernet_internet() {
+    # Find all connected ethernet devices
+    local eth_devices
+    eth_devices=$(nmcli -t -f DEVICE,TYPE,STATE device | grep -E '^[^:]+:ethernet:connected' | cut -d: -f1)
+
+    for dev in $eth_devices; do
+        # Test internet connectivity by pinging Cloudflare DNS through the specific ethernet device
+        if ping -c 1 -W 2 -I "$dev" 1.1.1.1 >/dev/null 2>&1; then
+            return 0 # Working ethernet internet found
+        fi
+    done
+    return 1 # No working ethernet internet
+}
+
+if check_ethernet_internet; then
+    # Ethernet internet active -> turn off Wi-Fi
+    if [[ "$(nmcli radio wifi)" == "enabled" ]]; then
+        nmcli radio wifi off
+        logger "99-wifi-auto-toggle: Ethernet internet active. Wi-Fi disabled."
+    fi
+else
+    # No ethernet internet -> turn on Wi-Fi
+    if [[ "$(nmcli radio wifi)" == "disabled" ]]; then
+        nmcli radio wifi on
+        logger "99-wifi-auto-toggle: No Ethernet internet. Wi-Fi enabled."
+    fi
+fi
+EOF
+
+        chmod +x "$dispatcher_script"
+        chown root:root "$dispatcher_script"
+        log_pass "Dynamic Wi-Fi auto-toggle script installed at ${dispatcher_script}"
+
+        # Trigger it immediately in background to apply current state (if not connected via wifi-only)
+        # Avoid running if user is on wlan0 to prevent instant session drop during optimize.sh
+        local current_ssh_ip=""
+        if [[ -n "${SSH_CONNECTION:-}" ]]; then
+            current_ssh_ip=$(echo "$SSH_CONNECTION" | awk '{print $3}')
+        fi
+        local wlan_ip=""
+        if command_exists ip; then
+            wlan_ip=$(ip -4 addr show wlan0 2>/dev/null | grep "inet " | awk '{print $2}' | cut -d/ -f1 || true)
         fi
 
-        if [[ "$eth_active" == "true" ]]; then
-            if grep -q "^dtoverlay=disable-wifi" "$CONFIG_FILE"; then
-                log_skip "dtoverlay=disable-wifi already set"
-            else
-                echo "dtoverlay=disable-wifi" >> "$CONFIG_FILE"
-                log_pass "Ethernet active & Wi-Fi unused: disabled Wi-Fi to reduce heat/power"
-            fi
+        if [[ -n "$current_ssh_ip" && -n "$wlan_ip" && "$current_ssh_ip" == "$wlan_ip" ]]; then
+            log_warn "Active SSH connection is on Wi-Fi ($wlan_ip). Skipping immediate Wi-Fi disablement to prevent disconnection."
+            log_warn "Auto-toggle will take effect on next boot or network state change."
         else
-            log_skip "Neither Wi-Fi nor Ethernet active or detected. Keeping Wi-Fi enabled for safety."
+            bash "$dispatcher_script" "system" "connectivity-change" >/dev/null 2>&1 &
+            log_pass "Applied Wi-Fi auto-toggle state immediately in background"
         fi
     else
-        log_skip "Wi-Fi is currently in use (active IP detected). Keeping Wi-Fi enabled."
+        log_warn "NetworkManager dispatcher directory ${dispatcher_dir} not found. Skipping auto-toggle script installation."
     fi
 
     # Ensure overclock parameters are commented out for system endurance
@@ -488,6 +539,70 @@ EOF
     # PCIe ASPM & APST Sleep Workarounds to prevent NVMe drive lockups/disconnects
     add_cmdline_param "pcie_aspm=off"
     add_cmdline_param "nvme_core.default_ps_max_latency_us=0"
+}
+
+optimize_network() {
+    log_section "NETWORK HARDENING & GRO OPTIMIZATION"
+
+    if ! command_exists ethtool; then
+        log_warn "ethtool is not installed. Network optimizations skipped."
+        return
+    fi
+
+    local interfaces=()
+    if [[ -d "/sys/class/net/eth0" ]]; then
+        interfaces+=("eth0")
+    fi
+    if [[ -d "/sys/class/net/wlan0" ]]; then
+        interfaces+=("wlan0")
+    fi
+
+    if [[ ${#interfaces[@]} -eq 0 ]]; then
+        log_skip "No suitable network interfaces found for GRO tuning"
+        return
+    fi
+
+    log_info "Configuring UDP GRO forwarding for interfaces: ${interfaces[*]}..."
+
+    local service_file="/etc/systemd/system/rpi5-udp-gro.service"
+    local tmp_service
+    tmp_service=$(mktemp)
+
+    cat > "$tmp_service" << EOF
+[Unit]
+Description=Optimize UDP GRO Forwarding for Tailscale
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EOF
+
+    for iface in "${interfaces[@]}"; do
+        echo "ExecStart=/sbin/ethtool -K $iface rx-udp-gro-forwarding on rx-gro-list off" >> "$tmp_service"
+    done
+
+    cat >> "$tmp_service" << EOF
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if files_differ "$service_file" "$tmp_service"; then
+        backup_file "$service_file"
+        mv -f "$tmp_service" "$service_file"
+        systemctl daemon-reload
+        log_pass "Network GRO persistence service created (rpi5-udp-gro.service)"
+    else
+        rm "$tmp_service"
+        log_skip "Network GRO persistence already configured"
+    fi
+
+    if systemctl enable --now rpi5-udp-gro.service >/dev/null 2>&1; then
+        log_pass "rpi5-udp-gro.service enabled and started"
+    else
+        log_warn "Failed to start rpi5-udp-gro.service"
+    fi
 }
 
 ################################################################################
@@ -1370,6 +1485,72 @@ optimize_eeprom() {
     rm -f "$new_config_file"
 }
 
+optimize_zsh() {
+    log_section "ZSH OPTIMIZATION"
+    
+    local target_user
+    target_user=$(get_target_user)
+    local target_home
+    target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    
+    local zshrc="${target_home}/.zshrc"
+    
+    if [[ ! -f "$zshrc" ]]; then
+        log_skip "No .zshrc found for user ${target_user}. Skipping Zsh optimizations."
+        return
+    fi
+    
+    # 1. Enable OMZ update reminder instead of auto update blocking
+    if grep -q "zstyle ':omz:update' mode" "$zshrc"; then
+        # Uncomment and set mode to reminder
+        sed -i "s/#\s*zstyle ':omz:update' mode reminder/zstyle ':omz:update' mode reminder/" "$zshrc"
+        # Ensure other update styles are commented out
+        sed -i "s/^zstyle ':omz:update' mode disabled/# zstyle ':omz:update' mode disabled/" "$zshrc"
+        sed -i "s/^zstyle ':omz:update' mode auto/# zstyle ':omz:update' mode auto/" "$zshrc"
+    else
+        echo "zstyle ':omz:update' mode reminder" >> "$zshrc"
+    fi
+    log_pass "Oh My Zsh auto-updates optimized (set to 'reminder' to prevent startup blocking)"
+
+    # 2. Add compinit caching optimization in .zshrc if not already present
+    if ! grep -q "zcompile \"\$HOME/.zcompdump\"" "$zshrc"; then
+        cat >> "$zshrc" << 'EOF'
+
+# Compile zcompdump in the background or on startup to speed up loading
+if [[ -s "$HOME/.zcompdump" ]]; then
+  if [[ ! -s "$HOME/.zcompdump.zwc" || "$HOME/.zcompdump" -nt "$HOME/.zcompdump.zwc" ]]; then
+    zcompile "$HOME/.zcompdump"
+  fi
+fi
+EOF
+        log_pass "Zsh compilation dump caching added to .zshrc"
+    else
+        log_skip "Zsh compilation dump cache optimization already present"
+    fi
+
+    # 3. Zwc compile target user's .zshrc and custom plugins for faster load time
+    log_info "Compiling Zsh config and custom plugins for faster loading..."
+    if command_exists zsh; then
+        sudo -u "$target_user" zsh -c 'zcompile ~/.zshrc'
+        # Compile plugins if they exist
+        local plugin_dir="${target_home}/.oh-my-zsh/custom/plugins"
+        if [[ -d "$plugin_dir" ]]; then
+            sudo -u "$target_user" zsh -c '
+                for f in ~/.oh-my-zsh/custom/plugins/**/*.zsh; do
+                    if [[ -f "$f" ]]; then
+                        zcompile -R "$f" 2>/dev/null || true
+                    fi
+                done
+            '
+        fi
+        log_pass "Zsh configurations successfully compiled to bytecode (.zwc)"
+        ((OPTIMIZATIONS_APPLIED++))
+    else
+        log_warn "zsh command not found, cannot compile config files"
+        ((OPTIMIZATIONS_SKIPPED++))
+    fi
+}
+
 ################################################################################
 # 9. Maintenance & Security
 ################################################################################
@@ -1507,6 +1688,7 @@ main() {
     optimize_cpu
     optimize_storage
     optimize_kernel
+    optimize_network
     setup_usb_automount
     optimize_docker
     fix_tailscale_race
@@ -1516,6 +1698,7 @@ main() {
     optimize_smartd
     optimize_ollama_service
     optimize_eeprom
+    optimize_zsh
     system_maintenance
     
     # Summary
