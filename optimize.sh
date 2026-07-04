@@ -797,11 +797,8 @@ setup_docker_compose_restart() {
     fi
 
     # Determine real user and home
-    local target_user="${SUDO_USER:-$USER}"
-    # If root, try to find 'rahul' or assume root
-    if [[ "$target_user" == "root" ]] && [[ -d "/home/rahul" ]]; then
-        target_user="rahul"
-    fi
+    local target_user
+    target_user=$(get_target_user)
     
     local target_home
     if command_exists getent; then
@@ -1337,7 +1334,8 @@ EOF
             fi
             
             # Ensure permissions
-            local target_user="${SUDO_USER:-$USER}"
+            local target_user
+            target_user=$(get_target_user)
             # Attempt to use detected user
             if [[ -n "$target_user" && "$target_user" != "root" ]]; then
                 if ! groups ollama | grep -q "\b${target_user}\b"; then
@@ -1584,8 +1582,7 @@ system_maintenance() {
 
     # Clean user-level caches that accumulate on the OS flash drive
     local target_user
-    target_user="${SUDO_USER:-}"
-    [[ -z "$target_user" ]] && target_user=$(id -nu 1000 2>/dev/null || echo "")
+    target_user=$(get_target_user)
 
     if [[ -n "$target_user" && "$target_user" != "root" ]]; then
         local target_home

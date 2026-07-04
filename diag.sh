@@ -733,7 +733,7 @@ check_docker() {
     
     # Check backing device transport
     local backing_dev
-    backing_dev=$(findmnt -n -o SOURCE --target "$data_root" 2>/dev/null)
+    backing_dev=$(findmnt -n -o SOURCE -T "$data_root" 2>/dev/null)
     local parent_dev
     parent_dev=$(lsblk -nd -o PKNAME -p "$backing_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$backing_dev"
@@ -1028,8 +1028,7 @@ check_system_services() {
 
     # Toolchain Audit (uv and agy)
     local target_user
-    target_user="${SUDO_USER:-}"
-    [[ -z "$target_user" ]] && target_user=$(id -nu 1000 2>/dev/null || echo "")
+    target_user=$(get_target_user)
     
     if [[ -n "$target_user" ]]; then
         local target_home

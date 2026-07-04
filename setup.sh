@@ -483,7 +483,7 @@ ZSH_THEME="amuse"
 zstyle ':omz:update' mode reminder
 
 # Custom plugins list
-plugins=(git nvm node npm sudo colored-man-pages history zsh-autosuggestions zsh-syntax-highlighting)
+plugins=(git node npm sudo colored-man-pages history zsh-autosuggestions zsh-syntax-highlighting)
 
 source $ZSH/oh-my-zsh.sh
 
@@ -680,8 +680,8 @@ main() {
         log_pass "Systemd daemon reloaded"
     fi
     
-    # Try to mount all filesystems from fstab (non-blocking)
-    mount -a 2>/dev/null || log_warn "Some mounts failed (may be expected)"
+    # Try to mount all local filesystems from fstab (non-blocking)
+    mount -a -t ext4,vfat 2>/dev/null || log_warn "Some mounts failed (may be expected)"
     
     log_section "SETUP COMPLETE"
     echo -e "${GREEN}✓ Raspberry Pi Home Server configured!${NC}"
