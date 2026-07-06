@@ -21,7 +21,7 @@ else
 fi
 
 # --- Constants ---
-SCRIPT_VERSION="4.6.0"
+SCRIPT_VERSION="4.6.1"
 # shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
 BOOT_TRAN=""
@@ -646,11 +646,23 @@ configure_syncthing() {
     log_info "Creating start_syncthing.sh..."
     cat > "$start_script" << 'EOF'
 #!/bin/bash
+# Enable UFW rules for Syncthing
+if [ -x /usr/sbin/ufw ]; then
+    echo "Allowing Syncthing in UFW..."
+    sudo /usr/sbin/ufw allow syncthing comment 'Syncthing Sync' >/dev/null
+    sudo /usr/sbin/ufw allow syncthing-gui comment 'Syncthing Web GUI' >/dev/null
+fi
+
 systemctl --user start syncthing.service
 if systemctl --user is-active --quiet syncthing.service; then
     echo "Syncthing service started successfully."
 else
     echo "Failed to start Syncthing service."
+    # Clean up on failure
+    if [ -x /usr/sbin/ufw ]; then
+        sudo /usr/sbin/ufw delete allow syncthing >/dev/null
+        sudo /usr/sbin/ufw delete allow syncthing-gui >/dev/null
+    fi
     exit 1
 fi
 EOF
@@ -666,6 +678,12 @@ EOF
 systemctl --user stop syncthing.service
 if ! systemctl --user is-active --quiet syncthing.service; then
     echo "Syncthing service stopped successfully."
+    # Remove UFW rules for Syncthing
+    if [ -x /usr/sbin/ufw ]; then
+        echo "Removing Syncthing rules from UFW..."
+        sudo /usr/sbin/ufw delete allow syncthing >/dev/null
+        sudo /usr/sbin/ufw delete allow syncthing-gui >/dev/null
+    fi
 else
     echo "Failed to stop Syncthing service."
     exit 1

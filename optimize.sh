@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Raspberry Pi Home Server Optimization - ULTIMATE EDITION v4.3.0
+# Raspberry Pi Home Server Optimization - ULTIMATE EDITION v4.6.1
 # Target: Debian Trixie/Bookworm (aarch64)
 # Optimizes for: Performance, Stability, Flash Longevity, Security
 # License: MIT (Copyright 2025 Rahul)
@@ -22,7 +22,7 @@ else
 fi
 
 # --- Constants & Environment ---
-SCRIPT_VERSION="4.6.0"
+SCRIPT_VERSION="4.6.1"
 CONFIG_FILE="/boot/firmware/config.txt"
 export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
@@ -842,6 +842,7 @@ User=root
 WorkingDirectory=$docker_dir
 ExecStartPre=/bin/sleep 15
 ExecStart=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose --profile lazy up --no-start
 ExecStart=/usr/bin/docker compose up -d
 RemainAfterExit=yes
 TimeoutStartSec=600
@@ -1582,13 +1583,18 @@ system_maintenance() {
 
     # Firewall setup
     if command_exists ufw; then
-        ufw allow ssh >/dev/null
-        ufw allow 80/tcp >/dev/null
-        ufw allow 443/tcp >/dev/null
+        ufw allow 22/tcp comment 'SSH Access' >/dev/null
+        ufw allow 80/tcp comment 'HTTP Web Traffic' >/dev/null
+        ufw allow 443/tcp comment 'HTTPS Secure Web Traffic' >/dev/null
         # Allow Docker traffic
-        ufw allow in on docker0 >/dev/null
-        # Fix for n8n <-> Ollama connection timeout (Allow wg-easy subnet to Ollama)
-        ufw allow from 10.8.1.0/24 to any port 11434 proto tcp >/dev/null
+        ufw allow in on docker0 comment 'Docker Bridge Interface' >/dev/null
+        # Allow Jellyfin traffic (Web GUI & discovery)
+        ufw allow 8096/tcp comment 'Jellyfin Web GUI' >/dev/null
+        ufw allow 1900/udp comment 'Jellyfin DLNA Discovery' >/dev/null
+        ufw allow 7359/udp comment 'Jellyfin Client Discovery' >/dev/null
+        ufw allow from any proto igmp comment 'Allow IGMP Multicast Membership' >/dev/null
+        ufw allow to 224.0.0.0/4 comment 'Allow Multicast Destinations' >/dev/null
+        ufw allow from 224.0.0.0/4 comment 'Allow Multicast Sources' >/dev/null
         # Disable logging to save flash
         ufw logging off >/dev/null
         echo "y" | ufw enable >/dev/null
