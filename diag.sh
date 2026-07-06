@@ -792,10 +792,16 @@ check_docker() {
     # Docker Compose Auto-Restart Service Check
     if [ -f "/etc/systemd/system/docker-compose-restart.service" ]; then
         if systemctl is-enabled --quiet docker-compose-restart.service 2>/dev/null; then
-             report_pass "Compose Auto-Restart: Enabled"
+             if grep -q "restart.sh" "/etc/systemd/system/docker-compose-restart.service"; then
+                  report_pass "Compose Auto-Restart: Enabled (uses restart.sh)"
+             else
+                  report_warn "Compose Auto-Restart: Enabled (legacy)" "Service still uses legacy inline docker compose down/up commands."
+             fi
         else
              report_warn "Compose Auto-Restart: Disabled" "Service exists but is not enabled."
         fi
+    else
+         report_warn "Compose Auto-Restart: Not configured" "Service file does not exist."
     fi
 }
 
@@ -999,6 +1005,17 @@ check_system_services() {
         report_pass "Entropy: Hardware RNG service active"
     else
         report_warn "Entropy: Hardware RNG service INACTIVE" "Install/enable rng-tools5 for cryptographic performance."
+    fi
+
+    # Daily Reboot
+    if [[ -f "/usr/local/bin/graceful-reboot" ]]; then
+        if systemctl is-active --quiet rpi-daily-reboot.timer 2>/dev/null; then
+            report_pass "Reboot: Daily graceful reboot timer active (6 AM)"
+        else
+            report_warn "Reboot: Daily graceful reboot timer is INACTIVE" "Run systemctl enable --now rpi-daily-reboot.timer"
+        fi
+    else
+        report_info "Reboot: Daily graceful reboot not configured"
     fi
 
     # Failed Units

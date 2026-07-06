@@ -815,14 +815,9 @@ setup_docker_compose_restart() {
     fi
 
     local service_file="/etc/systemd/system/docker-compose-restart.service"
-    
-    if [[ -f "$service_file" ]]; then
-        log_skip "Service docker-compose-restart already exists."
-        return
-    fi
 
     # Interactive Prompt
-    echo -e "${YELLOW}Do you want to enable automatic 'docker compose down && docker compose up -d' in $docker_dir on boot? [y/N]${NC}"
+    echo -e "${YELLOW}Do you want to enable/update automatic restart in $docker_dir on boot? [y/N]${NC}"
     local choice
     # Use || true to prevent exit on read failure (e.g., EOF)
     read -r -p "Select (default No): " choice || choice="N"
@@ -841,9 +836,7 @@ Type=oneshot
 User=root
 WorkingDirectory=$docker_dir
 ExecStartPre=/bin/sleep 15
-ExecStart=/usr/bin/docker compose down
-ExecStart=/usr/bin/docker compose --profile lazy up --no-start
-ExecStart=/usr/bin/docker compose up -d
+ExecStart=$docker_dir/restart.sh
 RemainAfterExit=yes
 TimeoutStartSec=600
 
@@ -852,7 +845,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         if systemctl enable docker-compose-restart.service 2>/dev/null; then
-             log_pass "Docker compose auto-restart enabled for $docker_dir"
+             log_pass "Docker compose auto-restart enabled/updated for $docker_dir"
         else
              log_warn "Failed to enable docker-compose-restart service"
         fi
@@ -916,6 +909,92 @@ EOF
     systemctl enable tailscale-fix.service 2>/dev/null \
         && log_pass "Tailscale boot fix enabled" \
         || log_warn "Failed to enable Tailscale boot fix"
+}
+
+################################################################################
+# 5b. Daily Graceful Reboot
+################################################################################
+
+setup_daily_reboot() {
+    log_section "DAILY GRACEFUL REBOOT"
+
+    local reboot_script="/usr/local/bin/graceful-reboot"
+    local reboot_service="/etc/systemd/system/rpi-daily-reboot.service"
+    local reboot_timer="/etc/systemd/system/rpi-daily-reboot.timer"
+    
+    local target_user
+    target_user=$(get_target_user)
+    local target_home
+    if command_exists getent; then
+        target_home=$(getent passwd "$target_user" | cut -d: -f6)
+    else
+        target_home="/home/$target_user"
+    fi
+    local docker_dir="${target_home}/docker"
+
+    # Write Graceful Reboot Script
+    log_info "Writing graceful reboot script..."
+    cat > "$reboot_script" << EOF
+#!/bin/bash
+# Log start of the reboot sequence
+logger -t graceful-reboot "Starting scheduled daily reboot..."
+
+# Gracefully stop Docker stack if docker is running and compose stack exists
+if [ -d "\$docker_dir" ] && command -v docker >/dev/null 2>&1; then
+    logger -t graceful-reboot "Stopping Docker Compose stack in \$docker_dir..."
+    cd "\$docker_dir" || exit 1
+    if /usr/bin/docker compose down --timeout 30; then
+        logger -t graceful-reboot "Docker Compose stack stopped successfully."
+    else
+        logger -t graceful-reboot "Warning: Docker Compose stack did not stop cleanly."
+    fi
+fi
+
+# Sync filesystems to write buffers to disk
+sync
+
+# Reboot
+/sbin/reboot
+EOF
+    chmod +x "$reboot_script"
+    log_pass "Graceful reboot script created at \$reboot_script"
+
+    # Write systemd service file
+    cat > "$reboot_service" << EOF
+[Unit]
+Description=Daily Graceful Reboot Service
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=\$reboot_script
+EOF
+    log_pass "Daily reboot service file created"
+
+    # Write systemd timer file (Daily at 6 AM)
+    cat > "$reboot_timer" << EOF
+[Unit]
+Description=Daily Graceful Reboot Timer
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    log_pass "Daily reboot timer file created"
+
+    # Reload systemd and enable/start timer
+    systemctl daemon-reload
+    # shellcheck disable=SC2015
+    systemctl enable --now rpi-daily-reboot.timer 2>/dev/null \
+        && log_pass "Daily graceful reboot timer enabled and started (6:00 AM daily)" \
+        || log_warn "Failed to enable and start daily graceful reboot timer"
+
+    ((OPTIMIZATIONS_APPLIED++))
 }
 
 ################################################################################
@@ -1715,6 +1794,7 @@ main() {
     optimize_docker
     fix_tailscale_race
     setup_docker_compose_restart
+    setup_daily_reboot
     optimize_memory
     optimize_logs
     optimize_smartd

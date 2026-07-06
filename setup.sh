@@ -762,6 +762,7 @@ main() {
     log_info "  • Node.js development environment"
     log_info "  • System hardening & security"
     log_info "  • Automatic USB mounting on boot"
+    log_info "  • Daily graceful reboot timer (6:00 AM)"
     log_info "  • Log files: /var/log/rpi-optimize.log"
     echo ""
     log_warn "⚠️  REBOOT IS REQUIRED TO APPLY ALL CHANGES"
