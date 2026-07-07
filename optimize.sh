@@ -591,6 +591,7 @@ EOF
     if files_differ "$service_file" "$tmp_service"; then
         backup_file "$service_file"
         mv -f "$tmp_service" "$service_file"
+        chmod 0644 "$service_file"
         systemctl daemon-reload
         log_pass "Network GRO persistence service created (rpi5-udp-gro.service)"
     else
@@ -816,6 +817,11 @@ setup_docker_compose_restart() {
 
     local service_file="/etc/systemd/system/docker-compose-restart.service"
 
+    if [[ -f "$service_file" ]]; then
+        log_skip "Docker compose auto-restart service already exists."
+        return
+    fi
+
     # Interactive Prompt
     echo -e "${YELLOW}Do you want to enable/update automatic restart in $docker_dir on boot? [y/N]${NC}"
     local choice
@@ -940,9 +946,9 @@ setup_daily_reboot() {
 logger -t graceful-reboot "Starting scheduled daily reboot..."
 
 # Gracefully stop Docker stack if docker is running and compose stack exists
-if [ -d "\$docker_dir" ] && command -v docker >/dev/null 2>&1; then
-    logger -t graceful-reboot "Stopping Docker Compose stack in \$docker_dir..."
-    cd "\$docker_dir" || exit 1
+if [ -d "$docker_dir" ] && command -v docker >/dev/null 2>&1; then
+    logger -t graceful-reboot "Stopping Docker Compose stack in $docker_dir..."
+    cd "$docker_dir" || exit 1
     if /usr/bin/docker compose down --timeout 30; then
         logger -t graceful-reboot "Docker Compose stack stopped successfully."
     else
@@ -963,14 +969,16 @@ EOF
     cat > "$reboot_service" << EOF
 [Unit]
 Description=Daily Graceful Reboot Service
+ConditionPathExists=$reboot_script
 DefaultDependencies=no
 Conflicts=shutdown.target
 Before=shutdown.target
 
 [Service]
 Type=oneshot
-ExecStart=\$reboot_script
+ExecStart=$reboot_script
 EOF
+    chmod 0644 "$reboot_service"
     log_pass "Daily reboot service file created"
 
     # Write systemd timer file (Daily at 6 AM)
@@ -985,6 +993,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+    chmod 0644 "$reboot_timer"
     log_pass "Daily reboot timer file created"
 
     # Reload systemd and enable/start timer
@@ -994,7 +1003,7 @@ EOF
         && log_pass "Daily graceful reboot timer enabled and started (6:00 AM daily)" \
         || log_warn "Failed to enable and start daily graceful reboot timer"
 
-    ((OPTIMIZATIONS_APPLIED++))
+    ((++OPTIMIZATIONS_APPLIED))
 }
 
 ################################################################################
