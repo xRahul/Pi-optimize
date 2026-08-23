@@ -139,7 +139,12 @@ Environment="OLLAMA_DEBUG=1"
 Environment="OLLAMA_MODELS=/mnt/usb/ollama"
 EOF
 
+    # Base state for the mock docker binary (tests override per scenario)
+    export MOCK_TAILSCALE_EXISTS=""
+
     # Source the script
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
 }
 
@@ -155,7 +160,7 @@ teardown() {
     [ "$status" -eq 0 ]
 
     # Check if the function attempted to apply optimizations
-    [[ "$output" =~ "LOG_INFO: Applying Ollama service configuration" ]]
+    [[ "$output" == *"LOG_INFO: Applying Ollama service configuration"* ]]
 
     # Read the file to verify content
     run cat "$OVERRIDE_FILE"
@@ -163,27 +168,28 @@ teardown() {
     echo "$output"
 
     # Verify OLLAMA_NUM_PARALLEL was updated to 1 (not 999)
-    [[ "$output" =~ 'Environment="OLLAMA_NUM_PARALLEL=1"' ]]
+    [[ "$output" == *'Environment="OLLAMA_NUM_PARALLEL=1"'* ]]
     # Verify OLLAMA_DEBUG (preserved) exists
-    [[ "$output" =~ 'Environment="OLLAMA_DEBUG=1"' ]]
+    [[ "$output" == *'Environment="OLLAMA_DEBUG=1"'* ]]
     # Verify OLLAMA_HOST (preserved) exists
-    [[ "$output" =~ 'Environment="OLLAMA_HOST=0.0.0.0"' ]]
+    [[ "$output" == *'Environment="OLLAMA_HOST=0.0.0.0"'* ]]
     # Verify OLLAMA_FLASH_ATTENTION is 1
-    [[ "$output" =~ 'Environment="OLLAMA_FLASH_ATTENTION=1"' ]]
+    [[ "$output" == *'Environment="OLLAMA_FLASH_ATTENTION=1"'* ]]
 }
 
 @test "fix_tailscale_race applies fix when container exists" {
-    export MOCK_TAILSCALE_EXISTS="1"
+    # Mock docker child process reads this from the environment (exported in setup)
+    MOCK_TAILSCALE_EXISTS="1"
     run fix_tailscale_race
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_PASS: Tailscale boot fix enabled" ]]
+    [[ "$output" == *"LOG_PASS: Tailscale boot fix enabled"* ]]
 }
 
 @test "fix_tailscale_race skips when container does not exist" {
-    export MOCK_TAILSCALE_EXISTS=""
+    MOCK_TAILSCALE_EXISTS=""
     run fix_tailscale_race
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_SKIP: Tailscale container not found" ]]
+    [[ "$output" == *"LOG_SKIP: Tailscale container not found"* ]]
 }

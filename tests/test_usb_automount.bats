@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# Mocks defined in setup() are invoked indirectly by the sourced script under test.
+# shellcheck disable=SC2317
 setup() {
     # Create a temporary directory for mocks
     MOCK_DIR=$(mktemp -d)
@@ -23,6 +25,8 @@ setup() {
     # Bypass [[ -b ... ]] check for USB device
     # Matches: if [[ ! -b "$usb_dev_path" ]]; then
     # We replace it with: if [[ -z "$usb_dev_path" ]]; then (which is false as it's set)
+    # Single quotes required: sed needs the literal backslash-dollar escape
+    # shellcheck disable=SC2016
     sed -i 's|if \[\[ ! -b "\$usb_dev_path" \]\]; then|if [[ -z "$usb_dev_path" ]]; then|' "$MOCK_DIR/optimize_testable.sh"
 
     chmod +x "$MOCK_DIR/optimize_testable.sh"
@@ -62,6 +66,8 @@ EOF
     chmod +x "$MOCK_DIR/bin/mkdir"
 
     # Mock lsblk with a configurable output
+    # Base state: empty -> mock falls back to its default scenario (tests override per scenario)
+    export LSBLK_OUTPUT=""
     cat << 'EOF' > "$MOCK_DIR/bin/lsblk"
 #!/bin/bash
 # Check if PKNAME is requested for root_dev (first call in setup_usb_automount)
@@ -89,6 +95,8 @@ EOF
 
     # Source the script
     set +u
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
     set -u
 
@@ -107,28 +115,29 @@ teardown() {
 }
 
 @test "setup_usb_automount selects correct USB partition" {
-    export LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda"
+    # Exported in setup; plain assignment keeps the export attribute (mock lsblk child reads it)
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda"
 
     run setup_usb_automount
 
     echo "Output: $output"
-    [[ "$output" =~ "LOG_PASS: USB mount added to fstab" ]]
+    [[ "$output" == *"LOG_PASS: USB mount added to fstab"* ]]
 }
 
 @test "setup_usb_automount ignores root disk partitions" {
-    export LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nmmcblk0p2 mmc part mmcblk0"
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nmmcblk0p2 mmc part mmcblk0"
 
     run setup_usb_automount
 
     echo "Output: $output"
-    [[ "$output" =~ "LOG_WARN: No USB device detected" ]]
+    [[ "$output" == *"LOG_WARN: No USB device detected"* ]]
 }
 
 @test "setup_usb_automount detects SD card as valid external storage" {
-    export LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nmmcblk1p1 mmc part mmcblk1"
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nmmcblk1p1 mmc part mmcblk1"
 
     run setup_usb_automount
 
     echo "Output: $output"
-    [[ "$output" =~ "LOG_PASS: USB mount added to fstab" ]]
+    [[ "$output" == *"LOG_PASS: USB mount added to fstab"* ]]
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# Mocks defined in setup() are invoked indirectly by the sourced script under test.
+# shellcheck disable=SC2317
 setup() {
     # Create a temporary directory for mocks
     MOCK_DIR=$(mktemp -d)
@@ -53,6 +55,8 @@ EOF
     # But we will define them immediately after.
     # Also set +u to avoid unbound variable errors during source if any
     set +u
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
     set -u
 
@@ -79,7 +83,7 @@ teardown() {
 
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_SKIP: BFQ already active for sda" ]]
+    [[ "$output" == *"LOG_SKIP: BFQ already active for sda"* ]]
 }
 
 @test "optimize_storage sets BFQ when available but not active" {
@@ -89,8 +93,7 @@ teardown() {
 
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_PASS: BFQ set for sda" ]]
-
+    [[ "$output" == *"LOG_PASS: BFQ set for sda"* ]]
     # Verify file content was changed
     run cat "$SYS_BLOCK_DIR/sda/queue/scheduler"
     [[ "$output" == "bfq" ]]
@@ -103,7 +106,7 @@ teardown() {
 
     echo "$output"
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_SKIP: BFQ not available for sda" ]]
+    [[ "$output" == *"LOG_SKIP: BFQ not available for sda"* ]]
 }
 
 @test "optimize_storage adds noatime to root if missing" {
@@ -113,9 +116,9 @@ teardown() {
     run optimize_storage
 
     echo "$output"
-    [[ "$output" =~ "Adding noatime to root filesystem" ]]
-    run cat "$FSTAB_FILE"
-    [[ "$output" =~ "defaults,noatime" ]]
+    [[ "$output" == *"Adding noatime to root filesystem"* ]]
+run cat "$FSTAB_FILE"
+    [[ "$output" == *"defaults,noatime"* ]]
 }
 
 @test "optimize_storage skips noatime if present" {
@@ -125,11 +128,11 @@ teardown() {
     run optimize_storage
 
     echo "$output"
-    [[ "$output" =~ "Root filesystem already has noatime" ]]
-    # Ensure it wasn't added twice to the root line
+    [[ "$output" == *"Root filesystem already has noatime"* ]]
+# Ensure it wasn't added twice to the root line
     run grep "UUID=1234-5678" "$FSTAB_FILE"
-    [[ "$output" =~ "defaults,noatime" ]]
-    [[ ! "$output" =~ "noatime,noatime" ]]
+    [[ "$output" == *"defaults,noatime"* ]]
+    [[ "$output" != *"noatime,noatime"* ]]
 }
 
 @test "optimize_storage adds commit=60,lazytime to root if ext4 and missing" {
@@ -139,9 +142,9 @@ teardown() {
     run optimize_storage
 
     echo "$output"
-    [[ "$output" =~ "Adding commit=60,lazytime to root filesystem" ]]
-    run cat "$FSTAB_FILE"
-    [[ "$output" =~ "defaults,noatime,commit=60,lazytime" ]]
+    [[ "$output" == *"Adding commit=60,lazytime to root filesystem"* ]]
+run cat "$FSTAB_FILE"
+    [[ "$output" == *"defaults,noatime,commit=60,lazytime"* ]]
 }
 
 @test "optimize_storage skips commit=60,lazytime if already present" {
@@ -151,8 +154,8 @@ teardown() {
     run optimize_storage
 
     echo "$output"
-    [[ "$output" =~ "Root filesystem already has commit=60 and lazytime" ]]
-    # Ensure it wasn't added twice
+    [[ "$output" == *"Root filesystem already has commit=60 and lazytime"* ]]
+# Ensure it wasn't added twice
     run grep -c "commit=" "$FSTAB_FILE"
     [ "$output" -eq 1 ]
 }

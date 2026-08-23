@@ -12,6 +12,8 @@ setup() {
 
     make_testable optimize.sh "$MOCK_DIR/optimize_testable.sh"
     set +u
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
     set -u
     standard_log_overrides
@@ -38,7 +40,7 @@ teardown() {
     run add_cmdline_param "pcie_aspm=off"
 
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "already in cmdline.txt" ]]
+    [[ "$output" == *"already in cmdline.txt"* ]]
     [ "$(cat "$CMDLINE_FILE")" = "$orig" ]
 }
 
@@ -49,7 +51,7 @@ teardown() {
     run add_cmdline_param "nvme_core.default_ps_max_latency_us=1000"
 
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "added to cmdline.txt" ]]
+    [[ "$output" == *"added to cmdline.txt"* ]]
     # grep -c counts LINES; cmdline.txt is single-line so count occurrences instead
     run bash -c "grep -o 'nvme_core.default_ps_max_latency_us=' '$CMDLINE_FILE' | wc -l"
     [ "$output" -eq 2 ]

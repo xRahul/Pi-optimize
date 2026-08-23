@@ -16,6 +16,8 @@ setup() {
 }
 
 @test "float_to_int converts simple decimals" {
+    # res is the nameref out-param of float_to_int; init so a silent failure asserts loudly
+    res=""
     float_to_int "3.14" res
     [ "$res" = "314" ]
     float_to_int "60" res
@@ -28,6 +30,7 @@ setup() {
 }
 
 @test "float_to_int handles negatives and trailing dots" {
+    res=""
     float_to_int "-0.08" res
     [ "$res" = "-8" ]
     float_to_int "-0.4" res

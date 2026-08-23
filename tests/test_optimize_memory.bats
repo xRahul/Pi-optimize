@@ -15,6 +15,8 @@ setup() {
 
     make_testable optimize.sh "$MOCK_DIR/optimize_testable.sh"
     set +u
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
     set -u
     standard_log_overrides
@@ -45,7 +47,10 @@ teardown() {
 }
 
 @test "optimize_memory NVMe branch comments out foreign swap lines correctly" {
-    export BOOT_TRAN="nvme"
+    # Read same-shell by the sourced script; no child process needs it exported
+    # Consumed by the sourced optimize_testable.sh at runtime, invisible to static analysis
+    # shellcheck disable=SC2034
+    BOOT_TRAN="nvme"
     cat > "$FSTAB_FILE" <<EOF
 PARTUUID=6d6d5a7a-02  /  ext4  defaults,noatime  0  1
 /dev/sda2  none  swap  sw  0  0
@@ -70,7 +75,10 @@ EOF
 }
 
 @test "optimize_memory NVMe branch preserves existing swapfile fstab entry" {
-    export BOOT_TRAN="nvme"
+    # Read same-shell by the sourced script; no child process needs it exported
+    # Consumed by the sourced optimize_testable.sh at runtime, invisible to static analysis
+    # shellcheck disable=SC2034
+    BOOT_TRAN="nvme"
     cat > "$FSTAB_FILE" <<EOF
 PARTUUID=6d6d5a7a-02  /  ext4  defaults,noatime  0  1
 $SWAPFILE_PATH  none  swap  sw,pri=10,nofail  0  0
@@ -116,7 +124,7 @@ zram-size = min(ram / 2, 4096)" > "$ZRAM_GENERATOR_CONF"
 
     [ "$status" -eq 0 ]
     [ ! -f "$ZRAM_GENERATOR_CONF" ]
-    [[ "$output" =~ "sole zram manager" ]]
+    [[ "$output" == *"sole zram manager"* ]]
 }
 
 @test "optimize_memory keeps zram-generator.conf when rpi-swap absent (legacy path)" {
@@ -127,5 +135,5 @@ zram-size = min(ram / 2, 4096)" > "$ZRAM_GENERATOR_CONF"
 
     [ "$status" -eq 0 ]
     [ -f "$ZRAM_GENERATOR_CONF" ]
-    [[ "$output" =~ "zstd" ]]
+    [[ "$output" == *"zstd"* ]]
 }

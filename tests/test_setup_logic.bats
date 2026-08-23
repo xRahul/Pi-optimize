@@ -9,6 +9,8 @@ mock_dpkg_query() {
 }
 export -f mock_dpkg_query
 
+# Mocks defined in setup() are invoked indirectly by the sourced script under test.
+# shellcheck disable=SC2317
 setup() {
     # Prepare setup.sh
     load helpers/setup
@@ -16,6 +18,8 @@ setup() {
     chmod +x setup_no_main.sh
 
     # Source it
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source ./setup_no_main.sh
 
     # Redefine log functions here to override utils.sh
@@ -59,15 +63,15 @@ teardown() {
 @test "system_core skips installed packages (e.g. curl)" {
     run system_core
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_SKIP: curl already installed" ]]
+    [[ "$output" == *"LOG_SKIP: curl already installed"* ]]
 }
 
 @test "system_core installs missing packages (e.g. vim)" {
     # vim is in the list, but not in our dpkg-query mock
     run system_core
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_INFO: Installing vim..." ]]
-    [[ "$output" =~ "MOCK_APT: -o DPkg::Lock::Timeout=300 install -y vim" ]]
+    [[ "$output" == *"LOG_INFO: Installing vim..."* ]]
+    [[ "$output" == *"MOCK_APT: -o DPkg::Lock::Timeout=300 install -y vim"* ]]
 }
 
 @test "system_core detects conflict between busybox-syslogd and rsyslog" {
@@ -75,7 +79,7 @@ teardown() {
     # rsyslog is in our dpkg-query mock
     run system_core
     [ "$status" -eq 0 ]
-    [[ "$output" =~ "LOG_WARN: Skipping busybox-syslogd: rsyslog detected (conflict)" ]]
+    [[ "$output" == *"LOG_WARN: Skipping busybox-syslogd: rsyslog detected (conflict)"* ]]
     # Ensure it did NOT try to install it
-    [[ ! "$output" =~ "MOCK_APT: install -y busybox-syslogd" ]]
+    [[ "$output" != *"MOCK_APT: install -y busybox-syslogd"* ]]
 }

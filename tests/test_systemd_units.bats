@@ -41,6 +41,8 @@ EOF
     mkdir -p "$MOCK_DIR/sys/class/net/eth0"
     sed -i "s|/sys/class/net|$MOCK_DIR/sys/class/net|g" "$MOCK_DIR/optimize_testable.sh"
 
+    # Generated at test runtime; cannot be statically followed
+    # shellcheck source=/dev/null
     source "$MOCK_DIR/optimize_testable.sh"
 }
 
@@ -58,13 +60,17 @@ teardown() {
     reboot_script="$MOCK_DIR/usr/local/bin/graceful-reboot"
 
     run cat "$service_file"
-    [[ "$output" =~ "ConditionPathExists=$reboot_script" ]]
-    [[ "$output" =~ "ExecStart=$reboot_script" ]]
-    [[ ! "$output" =~ '$reboot_script' ]]
+    # Literal-substring matches: unit content is data, not a regex
+    [[ "$output" == *"ConditionPathExists=$reboot_script"* ]]
+    [[ "$output" == *"ExecStart=$reboot_script"* ]]
+    # Intentional literal: unit must contain the expanded path, not the raw '$reboot_script' token
+    # shellcheck disable=SC2016
+    [[ "$output" != *'$reboot_script'* ]]
 
     run cat "$reboot_script"
-    [[ "$output" =~ "/docker" ]]
-    [[ ! "$output" =~ '$docker_dir' ]]
+    [[ "$output" == *"/docker"* ]]
+    # shellcheck disable=SC2016
+    [[ "$output" != *'$docker_dir'* ]]
 
     run stat -c "%a" "$service_file"
     [ "$output" = "644" ]
@@ -80,7 +86,7 @@ teardown() {
 
     service_file="$MOCK_DIR/etc/systemd/system/rpi5-udp-gro.service"
     run cat "$service_file"
-    [[ "$output" =~ "ExecStart=/sbin/ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off" ]]
+    [[ "$output" == *"ExecStart=/sbin/ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off"* ]]
 
     run stat -c "%a" "$service_file"
     [ "$output" = "644" ]

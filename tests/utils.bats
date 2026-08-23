@@ -6,6 +6,8 @@ setup() {
     # Bats usually runs from the directory where the test file is, or we configure it.
     # The workflow runs `bats tests/` from repo root.
     DIR="$( cd "$( dirname "$BATS_TEST_FILENAME" )" >/dev/null 2>&1 && pwd )"
+    # Directive paths resolve against cwd, not this file; lib/utils.sh is linted directly by CI
+    # shellcheck source=/dev/null
     source "$DIR/../lib/utils.sh"
 }
 
@@ -45,20 +47,33 @@ setup() {
 @test "log_info outputs message" {
   run log_info "test info message"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "test info message" ]]
+  [[ "$output" == *"test info message"* ]]
 }
 
 @test "log_pass outputs message" {
-  CHECKS_PASSED=0
   run log_pass "test pass message"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "test pass message" ]]
+  [[ "$output" == *"test pass message"* ]]
+}
+
+@test "log_pass increments CHECKS_PASSED when initialized" {
+  CHECKS_PASSED=0
+  # Direct call (no run subshell) so the counter side effect lands in this shell
+  log_pass "counter check" > /dev/null
+  [ "$CHECKS_PASSED" -eq 1 ]
 }
 
 @test "log_fail outputs message" {
-  CHECKS_FAILED=0
-  ERRORS=0
   run log_fail "test fail message"
   [ "$status" -eq 0 ]
-  [[ "$output" =~ "test fail message" ]]
+  [[ "$output" == *"test fail message"* ]]
+}
+
+@test "log_fail increments CHECKS_FAILED and ERRORS when initialized" {
+  CHECKS_FAILED=0
+  ERRORS=0
+  # Direct call (no run subshell) so the counter side effects land in this shell
+  log_fail "counter check" > /dev/null
+  [ "$CHECKS_FAILED" -eq 1 ]
+  [ "$ERRORS" -eq 1 ]
 }
