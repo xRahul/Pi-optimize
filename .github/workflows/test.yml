@@ -12,19 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Bats
         run: |
           sudo apt-get update
-          sudo apt-get install -y bats
-
-      - name: Check Syntax
-        run: |
-          bash -n setup.sh
-          bash -n optimize.sh
-          bash -n diag.sh
-          bash -n lib/utils.sh
+          sudo apt-get install -y bats shellcheck
 
       - name: Run Unit Tests
         run: bats tests/

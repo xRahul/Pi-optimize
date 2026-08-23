@@ -27,9 +27,14 @@ EOF
     chmod +x "$MOCK_DIR/bin/systemctl"
 
     # Prepare optimize.sh for sourcing
-    # Strip main call
-    sed '$d' optimize.sh > "$MOCK_DIR/optimize_testable.sh"
+    # Disable the exact `main "$@"` invocation (never "last line" — that breaks if content shifts)
+    load helpers/setup
+    make_testable optimize.sh "$MOCK_DIR/optimize_testable.sh"
     chmod +x "$MOCK_DIR/optimize_testable.sh"
+
+    # Redirect udev rule writes into the sandbox
+    export UDEV_RULES_DIR="$MOCK_DIR/udev/rules.d"
+    mkdir -p "$UDEV_RULES_DIR"
 
     # Create lib directory and mock utils.sh
     mkdir -p "$MOCK_DIR/lib"

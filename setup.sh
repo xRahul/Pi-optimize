@@ -10,6 +10,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Never hang on package configuration prompts (conffile conflicts, debconf)
+export DEBIAN_FRONTEND=noninteractive
+
 # --- Source Library ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/utils.sh
@@ -25,6 +28,8 @@ SCRIPT_VERSION="4.6.1"
 # shellcheck disable=SC2034
 USB_MOUNT_PATH="/mnt/usb"
 BOOT_TRAN=""
+# Set to 1 when any phase fails; gates the reboot prompt and final exit code
+OPTIMIZE_FAILED=0
 # CONFIG_FILE="/boot/firmware/config.txt" # Unused in setup.sh directly, used in optimize.sh
 # BACKUP_TIMESTAMP=$(date +%Y%m%d_%H%M%S) # Unused in setup.sh
 
@@ -37,22 +42,11 @@ usage() {
     echo "  -v, --version Show script version"
 }
 
-wait_for_apt_lock() {
-    local locks=("/var/lib/dpkg/lock-frontend" "/var/lib/dpkg/lock" "/var/lib/apt/lists/lock")
-    local i=0
-    
-    for lock in "${locks[@]}"; do
-        while fuser "$lock" >/dev/null 2>&1; do
-            if [ $i -eq 0 ]; then
-                log_info "Waiting for apt lock release..."
-            fi
-            sleep 1
-            ((i++))
-            if [ $i -gt 300 ]; then
-                log_error "Timed out waiting for apt lock. Is another install running?"
-            fi
-        done
-    done
+# Timeout (seconds) for apt to wait on dpkg/apt locks — handled natively by apt-get,
+# replacing the old fuser-based polling loop which silently no-oped when fuser was absent.
+APT_LOCK_TIMEOUT=300
+apt_get() {
+    apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT}" "$@"
 }
 
 # Target user is now resolved via get_target_user in lib/utils.sh
@@ -104,9 +98,8 @@ preflight_checks() {
 system_core() {
     log_section "SYSTEM CORE"
     
-    wait_for_apt_lock
     # shellcheck disable=SC2015
-    apt-get update && apt-get full-upgrade -y || log_error "Apt upgrade failed"
+    apt_get update && apt_get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
 
     if command_exists rpi-eeprom-update; then
@@ -146,6 +139,7 @@ system_core() {
         fi
     fi
 
+    local failed_pkgs=()
     for pkg in "${packages[@]}"; do
         if [[ -n "${installed_map[$pkg]:-}" ]]; then
             log_skip "$pkg already installed"
@@ -161,9 +155,15 @@ system_core() {
         fi
 
         log_info "Installing $pkg..."
-        apt-get install -y "$pkg" || log_warn "Failed: $pkg"
+        apt_get install -y "$pkg" || failed_pkgs+=("$pkg")
     done
-    log_pass "Core dependencies installed"
+
+    if [[ ${#failed_pkgs[@]} -gt 0 ]]; then
+        OPTIMIZE_FAILED=1
+        log_fail "Failed to install: ${failed_pkgs[*]}"
+    else
+        log_pass "Core dependencies installed"
+    fi
 }
 
 ################################################################################
@@ -197,21 +197,27 @@ docker_suite() {
 nodejs_tooling() {
     log_section "NODE.JS & TOOLING"
     
-    if ! command_exists node; then
-        log_info "Installing Node.js LTS via NodeSource..."
+    # Node >= 22 required (Jod LTS); distro node 18/20 does not satisfy this
+    local installed_major
+    installed_major=$(node -v 2>/dev/null | sed -n 's/^v\([0-9]\+\).*/\1/p' || true)
+    if [[ -z "$installed_major" || "$installed_major" -lt 22 ]]; then
+        if [[ -n "$installed_major" ]]; then
+            log_warn "Found Node.js v${installed_major} (< 22) — upgrading via NodeSource..."
+        else
+            log_info "Installing Node.js LTS via NodeSource..."
+        fi
         # NodeSource manual installation (modern way)
-        wait_for_apt_lock
-        apt-get update
-        apt-get install -y ca-certificates curl gnupg
+        apt_get update
+        apt_get install -y ca-certificates curl gnupg
         mkdir -p /etc/apt/keyrings
-        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-        
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+
         # Node 22 (Jod) is the current LTS as of 2025/2026
         local node_major="22"
         echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
-        
-        apt-get update
-        apt-get install -y nodejs
+
+        apt_get update
+        apt_get install -y nodejs
     fi
     log_pass "Node.js: $(node -v)"
     
@@ -267,88 +273,10 @@ install_ollama() {
 
     # --- Optimizations & Configuration ---
     if [ "$proceed_config" = true ]; then
-        log_info "Checking Ollama configuration..."
-        local override_dir="/etc/systemd/system/ollama.service.d"
-        local override_file="${override_dir}/override.conf"
-        local models_dir="/usr/share/ollama/.ollama/models" # Default
-        local bind_addr="127.0.0.1"
-        local optimize_config=false
-
-        # Extract existing values if they exist
-        if [ -f "$override_file" ]; then
-            models_dir=$(grep "OLLAMA_MODELS=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "$models_dir")
-            bind_addr=$(grep "OLLAMA_HOST=" "$override_file" | cut -d'=' -f2 | tr -d '"' || echo "$bind_addr")
-        fi
-
-        # 1. Storage Optimization (Critical for SD cards)
-        if mountpoint -q /mnt/usb; then
-            if [[ "$models_dir" == "/mnt/usb"* ]]; then
-                log_skip "Ollama storage already configured for USB ($models_dir)"
-            else
-                echo -e "${GREEN}USB drive detected at /mnt/usb.${NC}"
-                if confirm_action "Store Ollama models on USB drive (Highly Recommended)?"; then
-                    models_dir="/mnt/usb/ollama"
-                    mkdir -p "$models_dir"
-                    # Ensure ollama user exists (installer should have created it)
-                    chown ollama:ollama "$models_dir" 2>/dev/null || true
-
-                    local target_user
-                    target_user=$(get_target_user)
-                    if [[ -n "$target_user" && "$target_user" != "root" ]]; then
-                         usermod -aG "$target_user" ollama 2>/dev/null || true
-                    fi
-
-                    log_pass "Model storage configured: $models_dir"
-                    optimize_config=true
-                fi
-            fi
-        fi
-
-        # 2. Network Optimization
-        if [[ "$bind_addr" == "0.0.0.0" ]]; then
-             log_skip "Ollama already exposed to network (0.0.0.0)"
-        else
-            if confirm_action "Expose Ollama to local network (0.0.0.0) for external access/Docker UI?"; then
-                bind_addr="0.0.0.0"
-                log_pass "Bind address set to 0.0.0.0"
-                optimize_config=true
-            fi
-        fi
-
-        # 3. Performance Optimizations (Idempotency check)
-        if ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file" 2>/dev/null; then
-            log_info "New performance optimizations pending..."
-            optimize_config=true
-        fi
-
-        # Apply Systemd Overrides if needed
-        if [ "$optimize_config" = true ]; then
-            mkdir -p "$override_dir"
-            cat > "$override_file" <<EOF
-[Unit]
-After=network-online.target
-RequiresMountsFor=${models_dir}
-
-[Service]
-Environment="OLLAMA_MODELS=${models_dir}"
-Environment="OLLAMA_HOST=${bind_addr}"
-Environment="OLLAMA_KEEP_ALIVE=5m"
-Environment="OLLAMA_NUM_PARALLEL=1"
-Environment="OLLAMA_FLASH_ATTENTION=1"
-Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
-Environment="OLLAMA_MAX_LOADED_MODELS=1"
-EOF
-            log_pass "Systemd override configured"
-            systemctl daemon-reload
-            systemctl restart ollama
-        fi
-        
-        # Verification
-        if systemctl is-active --quiet ollama; then
-            log_pass "Ollama service active"
-        else
-            log_warn "Ollama service failed to restart. Check 'systemctl status ollama'"
-        fi
+        # optimize.sh owns /etc/systemd/system/ollama.service.d/override.conf:
+        # it selects model storage (USB if >=8GB free), applies performance env vars,
+        # and fixes group permissions. Nothing to configure here.
+        log_info "Ollama service tuning (model storage, parallelism, cache) is applied by optimize.sh"
     fi
 }
 
@@ -402,14 +330,17 @@ install_zsh_suite() {
 
     local target_user
     target_user=$(get_target_user)
+    if [[ "$target_user" == "root" ]]; then
+        log_warn "No non-root target user detected — skipping zsh suite (would modify /root)"
+        return
+    fi
     local target_home
     target_home=$(getent passwd "$target_user" | cut -d: -f6)
 
     # 1. Ensure Zsh package is installed
     if ! command_exists zsh; then
         log_info "Installing Zsh..."
-        wait_for_apt_lock
-        apt-get install -y zsh || log_error "Failed to install Zsh"
+        apt_get install -y zsh || log_error "Failed to install Zsh"
     else
         log_skip "Zsh already installed"
     fi
@@ -456,15 +387,14 @@ install_zsh_suite() {
         fi
     fi
 
-    # 4. Write custom .zshrc
+    # 4. Write custom .zshrc (managed: never clobbers user edits)
     local zshrc_file="${target_home}/.zshrc"
-    if [[ -f "$zshrc_file" ]]; then
-        log_info "Backing up existing .zshrc to .zshrc.bak..."
-        backup_file "$zshrc_file"
-    fi
+    local state_dir="${target_home}/.config/rpi-optimize"
+    local hash_file="${state_dir}/zshrc.sha256"
+    local tmp_zshrc
+    tmp_zshrc=$(mktemp)
 
-    log_info "Writing custom .zshrc configuration..."
-    cat > "$zshrc_file" << 'EOF'
+    cat > "$tmp_zshrc" << 'EOF'
 # Keep lengthy history
 HISTSIZE=100000
 SAVEHIST=100000
@@ -498,22 +428,15 @@ export NVM_DIR="$HOME/.nvm"
 export COLORTERM=truecolor
 export TERM=xterm-256color
 
-# Android SDK & Java 21
-export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+# Android SDK & Java 21 (only if installed; arm64 path)
+[ -d /usr/lib/jvm/java-21-openjdk-arm64 ] && export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
 export ANDROID_HOME=$HOME/android-sdk
-export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$JAVA_HOME/bin
+[ -d "$ANDROID_HOME" ] && export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+[[ -n "${JAVA_HOME:-}" && -d "$JAVA_HOME/bin" ]] && export PATH=$PATH:$JAVA_HOME/bin
 export PATH="$PATH:$HOME/flutter/bin"
-
-# Added by Antigravity CLI installer
-export PATH="/home/rahul/.local/bin:$PATH"
-
-alias pbcopy='clip.exe'
-alias pbpaste='powershell.exe -Command "Get-Clipboard" | tr -d "\r"'
 
 # Antigravity CLI Verbose & Debug Config
 export OPENCODE_ANTIGRAVITY_DEBUG=2
-export DEBUG=1
-export VERBOSE=1
 
 # bun completions
 [ -s "$HOME/.bun/_bun" ] && source "$HOME/.bun/_bun"
@@ -531,13 +454,37 @@ done
 export PATH
 # <<< tokless path <<<
 
-export ANTHROPIC_BASE_URL=http://localhost:11434
-export ANTHROPIC_AUTH_TOKEN=ollama
-export ANTHROPIC_API_KEY=""
+# Uncomment to route Claude-style CLIs through the local Ollama proxy:
+# export ANTHROPIC_BASE_URL=http://localhost:11434
+# export ANTHROPIC_AUTH_TOKEN=ollama
 EOF
 
-    chown "$target_user:$target_user" "$zshrc_file"
-    log_pass ".zshrc successfully written and owned by $target_user"
+    local template_hash current_hash managed_hash
+    template_hash=$(sha256sum "$tmp_zshrc" | awk '{print $1}')
+    current_hash=$( [[ -f "$zshrc_file" ]] && sha256sum "$zshrc_file" | awk '{print $1}' || echo "absent" )
+    managed_hash=$( [[ -f "$hash_file" ]] && cat "$hash_file" || echo "" )
+
+    if [[ "$current_hash" == "$template_hash" ]]; then
+        log_skip ".zshrc already matches the managed configuration"
+        rm -f "$tmp_zshrc"
+    elif [[ "$current_hash" == "absent" || "$current_hash" == "$managed_hash" || -z "$managed_hash" && -f /etc/skel/.zshrc && "$current_hash" == "$(sha256sum /etc/skel/.zshrc | awk '{print $1}')" ]]; then
+        # Fresh install (stock skel file), no user edits since our last write, or no file — safe to replace
+        [[ -f "$zshrc_file" ]] && backup_file "$zshrc_file"
+        install -m 0644 -o "$target_user" -g "$(id -gn "$target_user")" "$tmp_zshrc" "$zshrc_file"
+        mkdir -p "$state_dir"
+        printf '%s\n' "$template_hash" > "${state_dir}/zshrc.sha256.tmp"
+        mv "${state_dir}/zshrc.sha256.tmp" "$hash_file"
+        chown "$target_user:$(id -gn "$target_user")" "$hash_file" "$state_dir"
+        rm -f "$tmp_zshrc"
+        log_pass ".zshrc written and owned by $target_user"
+    else
+        # User modified .zshrc since our last write — do not destroy their edits
+        cp "$tmp_zshrc" "${zshrc_file}.rpi-optimize.new"
+        chown "$target_user:$(id -gn "$target_user")" "${zshrc_file}.rpi-optimize.new"
+        rm -f "$tmp_zshrc"
+        log_warn ".zshrc was customized since last setup run — left untouched"
+        log_info "New template saved to ${zshrc_file}.rpi-optimize.new for manual merge"
+    fi
 
     # 5. Change default shell to Zsh for target user
     local current_shell
@@ -570,18 +517,25 @@ usb_optimization() {
         log_skip "Mount directory already exists: $mount_path"
     fi
     
-    # Run optimize.sh for system-wide tuning
+    # Run optimize.sh for system-wide tuning (honest handoff: failures propagate)
     if [[ -f "${SCRIPT_DIR}/optimize.sh" ]]; then
         chmod +x "${SCRIPT_DIR}/optimize.sh"
         log_info "Running optimize.sh..."
-        "${SCRIPT_DIR}/optimize.sh" || log_warn "optimize.sh encountered issues but continuing"
-        log_pass "Optimizations applied"
+        local opt_rc=0
+        "${SCRIPT_DIR}/optimize.sh" || opt_rc=$?
+        if [[ "$opt_rc" -eq 0 ]]; then
+            log_pass "Optimizations applied"
+        else
+            OPTIMIZE_FAILED=1
+            log_fail "optimize.sh failed (exit $opt_rc) — system is only partially tuned"
+        fi
     else
+        OPTIMIZE_FAILED=1
         log_error "optimize.sh not found in directory: ${SCRIPT_DIR}"
     fi
-    
+
     # Verify USB mount was configured
-    if grep -q "$mount_path" /etc/fstab; then
+    if grep -qE "^[^#].*[[:space:]]${mount_path}[[:space:]]" /etc/fstab; then
         log_pass "USB mount verified in fstab"
     else
         log_warn "USB mount not found in fstab - may need manual configuration"
@@ -628,6 +582,10 @@ configure_syncthing() {
     log_section "SYNCTHING CONTROL CONFIGURATION"
     local target_user
     target_user=$(get_target_user)
+    if [[ "$target_user" == "root" ]]; then
+        log_warn "No non-root target user detected — skipping syncthing configuration"
+        return
+    fi
     local target_home
     target_home=$(getent passwd "$target_user" | cut -d: -f6)
 
@@ -742,8 +700,10 @@ main() {
     nodejs_tooling
     install_uv_tooling
     install_zsh_suite
-    usb_optimization
+    # Ollama BEFORE optimize.sh: optimize_ollama_service owns the service config and
+    # skips when ollama is absent — installing first ensures fresh provisions get tuned.
     install_ollama
+    usb_optimization
     configure_syncthing
     
     # Post-setup verification and reload
@@ -752,9 +712,13 @@ main() {
     fi
     
     # Try to mount all local filesystems from fstab (non-blocking)
-    mount -a -t ext4,vfat 2>/dev/null || log_warn "Some mounts failed (may be expected)"
-    
+    mount -a 2>/dev/null || log_warn "Some mounts failed (may be expected)"
+
     log_section "SETUP COMPLETE"
+    if [[ "$OPTIMIZE_FAILED" -ne 0 ]]; then
+        log_fail "Setup finished WITH ERRORS — review the failures above before rebooting"
+        exit 1
+    fi
     echo -e "${GREEN}✓ Raspberry Pi Home Server configured!${NC}"
     log_info "Applied Optimizations:"
     log_info "  • Hardware thermals & performance tuning"

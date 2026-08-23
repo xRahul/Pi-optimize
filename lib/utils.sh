@@ -141,7 +141,7 @@ backup_file() {
     local file="$1"
     local backup_dir="${BACKUP_DIR:-/var/backups/rpi-optimize}"
     local timestamp
-    timestamp=$(date +%Y%m%d_%H%M%S)
+    timestamp=$(date +%Y%m%d_%H%M%S%N)
 
     if [[ -f "$file" ]]; then
         mkdir -p "$backup_dir"

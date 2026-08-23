@@ -48,7 +48,11 @@ usage() {
 
 # shellcheck disable=SC2317
 cleanup() {
-    rm -f "$LOCK_FILE"
+    # Only remove the lock if we still own it — a second instance's exit
+    # must not delete the first instance's lock.
+    if [[ -f "$LOCK_FILE" && "$(cat "$LOCK_FILE" 2>/dev/null)" == "$$" ]]; then
+        rm -f "$LOCK_FILE"
+    fi
 }
 
 # shellcheck disable=SC2317
@@ -68,7 +72,11 @@ acquire_lock() {
         local pid
         pid=$(< "$LOCK_FILE")
         if kill -0 "$pid" 2>/dev/null; then
-            log_error "Script is already running (PID: $pid)"
+            # PID reuse guard: only refuse when the holder is actually this script
+            if tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "optimize.sh"; then
+                log_error "Script is already running (PID: $pid)"
+            fi
+            log_warn "Stale lock from unrelated PID $pid — reclaiming"
         fi
     fi
     echo $$ > "$LOCK_FILE"
@@ -84,14 +92,19 @@ ensure_dependencies() {
 
 add_cmdline_param() {
     local param="$1"
-    local cmdline_file="/boot/firmware/cmdline.txt"
+    local cmdline_file="${CMDLINE_FILE:-/boot/firmware/cmdline.txt}"
     if [[ -f "$cmdline_file" ]]; then
-        if grep -q -F "$param" "$cmdline_file"; then
+        # Word-boundary match so a superset value (e.g. foo=10 vs foo=1) doesn't false-positive a skip
+        if grep -qE "(^|[[:space:]])${param}([[:space:]]|$)" "$cmdline_file"; then
             log_skip "Kernel parameter '$param' already in cmdline.txt"
         else
             # Trim spaces, remove existing trailing spaces, append param on the single line
-            sed -i -E "s/[[:space:]]*$/ ${param}/" "$cmdline_file"
-            log_pass "Kernel parameter '$param' added to cmdline.txt"
+            sed -i -E "s/[[:space:]]*$/ ${param}/" "$cmdline_file" || log_warn "Failed to update $cmdline_file (read-only /boot?)"
+            if grep -qE "(^|[[:space:]])${param}([[:space:]]|$)" "$cmdline_file"; then
+                log_pass "Kernel parameter '$param' added to cmdline.txt"
+            else
+                log_warn "Kernel parameter '$param' not present after write — verify /boot is writable"
+            fi
         fi
     fi
 }
@@ -106,6 +119,12 @@ optimize_hardware() {
     [[ -f "$CONFIG_FILE" ]] || log_error "$CONFIG_FILE not found"
 
     backup_file "$CONFIG_FILE"
+
+    # Read-only /boot (mount or permission): nothing below can succeed — fail loudly once
+    if [[ ! -w "$CONFIG_FILE" ]]; then
+        log_warn "$CONFIG_FILE not writable (read-only /boot mount?) — skipping hardware config"
+        return
+    fi
 
     # Pi 5 Aggressive Cooling
     if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
@@ -289,7 +308,7 @@ optimize_cpu() {
     else
         # Set governor to performance immediately (runtime)
         if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1
+            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1 || log_warn "Failed to set CPU governor at runtime"
             log_pass "CPU governor set to performance (runtime)"
         fi
     fi
@@ -416,6 +435,18 @@ optimize_storage() {
         done
     fi
 
+    # 2c. Persistent scheduler selection via udev (runtime echoes above are lost at reboot)
+    local udev_dir="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
+    local udev_sched_rule="$udev_dir/60-rpi-io-scheduler.rules"
+    local desired_rule='ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"\nACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme*", ATTR{queue/scheduler}="none"'
+    if [[ ! -f "$udev_sched_rule" ]] || ! printf '%b\n' "$desired_rule" | cmp -s - "$udev_sched_rule"; then
+        printf '%b\n' "$desired_rule" > "$udev_sched_rule"
+        chmod 0644 "$udev_sched_rule"
+        log_pass "Persistent I/O scheduler udev rule installed (BFQ for rotational USB/SD, none for NVMe)"
+    else
+        log_skip "I/O scheduler udev rule already installed"
+    fi
+
     # 3. fstrim for SSDs (if applicable)
     if systemctl list-unit-files | grep -q fstrim.timer; then
         if systemctl is-active --quiet fstrim.timer; then
@@ -485,8 +516,9 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 
 # Security Hardening
-net.ipv4.conf.all.rp_filter=1
-net.ipv4.conf.default.rp_filter=1
+# rp_filter=2 (loose): strict mode drops tailscale overlay + wlan/eth failover asymmetric traffic
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.conf.default.rp_filter=2
 net.ipv4.conf.all.accept_source_route=0
 net.ipv4.conf.default.accept_source_route=0
 net.ipv4.conf.all.send_redirects=0
@@ -501,6 +533,7 @@ EOF
     if files_differ "$sysctl_conf" "$tmp_conf"; then
         backup_file "$sysctl_conf"
         mv -f "$tmp_conf" "$sysctl_conf"
+        chmod 0644 "$sysctl_conf"
         sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
         log_pass "Kernel parameters optimized (including BBR & Security)"
     else
@@ -550,12 +583,13 @@ optimize_network() {
     fi
 
     local interfaces=()
-    if [[ -d "/sys/class/net/eth0" ]]; then
-        interfaces+=("eth0")
-    fi
-    if [[ -d "/sys/class/net/wlan0" ]]; then
-        interfaces+=("wlan0")
-    fi
+    local iface
+    for iface in /sys/class/net/*; do
+        iface=$(basename "$iface")
+        # Physical interfaces only (Trixie names onboard NIC end0; older kernels eth0/wlan0)
+        [[ "$iface" == "lo" || "$iface" == docker0 || "$iface" == veth* || "$iface" == tailscale* || "$iface" == br-* || "$iface" == wg* ]] && continue
+        [[ -d "/sys/class/net/$iface" ]] && interfaces+=("$iface")
+    done
 
     if [[ ${#interfaces[@]} -eq 0 ]]; then
         log_skip "No suitable network interfaces found for GRO tuning"
@@ -682,9 +716,13 @@ setup_usb_automount() {
         
         echo "UUID=$usb_uuid  $mount_path  $fs_type  $mount_opts  0  2" >> "$fstab_file"
         log_pass "USB mount added to fstab (UUID: $usb_uuid, Type: $fs_type)"
-        
+
         # Attempt to mount immediately so subsequent checks pass
-        mount "$mount_path" 2>/dev/null || true
+        if mount "$mount_path" 2>/dev/null; then
+            log_pass "$mount_path mounted"
+        else
+            log_warn "fstab entry added but immediate mount failed (device busy/absent?) — will retry at boot"
+        fi
     fi
     
     # Create systemd mount override to ensure Docker waits
@@ -754,6 +792,10 @@ optimize_docker() {
 
     # Merge or Write
     if [[ -f "$docker_config" ]]; then
+        if ! jq empty "$docker_config" 2>/dev/null; then
+            log_warn "daemon.json is not valid JSON — skipping merge to prevent data loss. Fix manually."
+            return
+        fi
         if command_exists jq; then
             # Idempotency Check: Compare existing vs new (merged)
             local current_json
@@ -817,7 +859,12 @@ setup_docker_compose_restart() {
 
     local service_file="/etc/systemd/system/docker-compose-restart.service"
 
-    if [[ -f "$service_file" ]]; then
+    # Legacy units (inline command instead of restart.sh) get upgraded below rather
+    # than skipped forever — diag.sh would otherwise warn about them permanently.
+    if [[ -f "$service_file" ]] && ! grep -q "restart.sh" "$service_file"; then
+        log_info "Legacy docker-compose-restart unit detected — will upgrade"
+        rm -f "$service_file"
+    elif [[ -f "$service_file" ]]; then
         log_skip "Docker compose auto-restart service already exists."
         return
     fi
@@ -872,8 +919,10 @@ fix_tailscale_race() {
         return
     fi
 
-    # Check if tailscale container exists (running or stopped)
-    if [[ -z "$(docker ps -a -q -f name='^tailscale$')" ]]; then
+    # Check if tailscale container exists (running or stopped); guard against daemon garbage
+    local ts_out
+    ts_out=$(timeout 15 docker ps -a -q -f name='^tailscale$' 2>/dev/null) || ts_out=""
+    if [[ -z "$ts_out" ]]; then
         log_skip "Tailscale container not found. Skipping fix."
         return
     fi
@@ -903,6 +952,7 @@ EOF
 
     if files_differ "$service_file" "$tmp_service"; then
         mv -f "$tmp_service" "$service_file"
+        chmod 0644 "$service_file"
         systemctl daemon-reload
         log_pass "Tailscale boot fix service updated"
     else
@@ -1013,6 +1063,12 @@ EOF
 optimize_memory() {
     log_section "MEMORY & SWAP"
 
+    # Test seams (defaults keep production behavior)
+    local fstab_file="${FSTAB_FILE:-/etc/fstab}"
+    local swapfile_path="${SWAPFILE_PATH:-/swapfile}"
+    local zram_conf="${ZRAM_GENERATOR_CONF:-/etc/systemd/zram-generator.conf}"
+    local rpi_swap_conf="${RPI_SWAP_CONF:-/etc/rpi/swap.conf}"
+
     # 1. Disable Disk-based Swap (Permanent for flash, hybrid/overflow for NVMe)
     log_info "Configuring swap settings..."
     
@@ -1040,14 +1096,14 @@ optimize_memory() {
         log_info "NVMe boot detected. Configuring 4GB static swapfile for memory overflow..."
         
         # Disable fstab swap entries that are NOT our swapfile
-        if grep -E "^[^#].*\sswap\s" /etc/fstab | grep -v "/swapfile" >/dev/null; then
-            sed -i '/\/swapfile/! s/\sswap\s/#\0/' /etc/fstab
+        if grep -E "^[^#].*\sswap\s" "$fstab_file" | grep -v "$swapfile_path" >/dev/null; then
+            sed -i "\|$swapfile_path|!{/^[^#]/ {/\sswap\s/ s/^/#/}}" "$fstab_file"
             log_pass "Non-swapfile fstab entries disabled"
         fi
 
         # Disable any active non-zram, non-swapfile swaps
         local bad_swaps
-        bad_swaps=$(swapon --show --noheadings | grep -v "zram" | grep -v "/swapfile" | awk '{print $1}' || true)
+        bad_swaps=$(swapon --show --noheadings | grep -v "zram" | grep -v "$swapfile_path" | awk '{print $1}' || true)
         if [[ -n "$bad_swaps" ]]; then
             echo "$bad_swaps" | xargs -r swapoff 2>/dev/null || true
             log_pass "Active flash/unwanted swap(s) disabled"
@@ -1055,38 +1111,40 @@ optimize_memory() {
 
         # Create 4GB swapfile on NVMe if not exists or size is wrong
         local create_swap=false
-        if [[ ! -f /swapfile ]]; then
+        if [[ ! -f "$swapfile_path" ]]; then
             create_swap=true
         else
             local sf_size
-            sf_size=$(du -m /swapfile | cut -f1)
+            sf_size=$(du -m "$swapfile_path" | cut -f1)
             if [[ $sf_size -lt 4000 ]]; then
-                swapoff /swapfile 2>/dev/null || true
-                rm -f /swapfile
+                swapoff "$swapfile_path" 2>/dev/null || true
+                rm -f "$swapfile_path"
                 create_swap=true
             fi
         fi
 
         if [[ "$create_swap" == "true" ]]; then
             log_info "Creating 4GB swapfile on NVMe..."
-            fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
-            chmod 600 /swapfile
-            mkswap /swapfile
+            fallocate -l 4G "$swapfile_path" || dd if=/dev/zero of="$swapfile_path" bs=1M count=4096
+            chmod 600 "$swapfile_path"
+            mkswap "$swapfile_path"
             log_pass "Swapfile initialized"
         fi
 
         # Enable swapfile with priority 10
-        if swapon --show --noheadings | grep -q "/swapfile"; then
+        if swapon --show --noheadings | grep -q "$swapfile_path"; then
             log_skip "Swapfile already active"
+        elif swapon -p 10 "$swapfile_path" 2>/dev/null; then
+            log_pass "Swapfile activated (priority 10)"
         else
-            swapon -p 10 /swapfile 2>/dev/null && log_pass "Swapfile activated (priority 10)" || log_warn "Failed to activate swapfile"
+            log_warn "Failed to activate swapfile"
         fi
 
         # Ensure in fstab
-        if grep -q "/swapfile" /etc/fstab; then
+        if grep -q "$swapfile_path" "$fstab_file"; then
             log_skip "Swapfile already configured in fstab"
         else
-            echo "/swapfile  none  swap  sw,pri=10,nofail  0  0" >> /etc/fstab
+            echo "$swapfile_path  none  swap  sw,pri=10,nofail  0  0" >> "$fstab_file"
             log_pass "Swapfile configured in fstab"
         fi
     else
@@ -1098,18 +1156,16 @@ optimize_memory() {
             log_pass "Active disk swap(s) disabled"
         fi
 
-        # Disable fstab swap entries
-        if grep -E "^[^#].*\sswap\s" /etc/fstab >/dev/null; then
-            sed -i '/\sswap\s/ s/^/#/' /etc/fstab
+        # Disable fstab swap entries (uncommented lines only — idempotent across runs)
+        if grep -E "^[^#].*\sswap\s" "$fstab_file" >/dev/null; then
+            sed -i '/^[^#]/ {/\sswap\s/ s/^/#/}' "$fstab_file"
             log_pass "Swap entries in fstab disabled"
         fi
     fi
 
     # Configure rpi-swap (Raspberry Pi OS Bookworm/Trixie) to use ZRAM only, preventing file writeback
-    if [[ -f /etc/rpi/swap.conf ]]; then
+    if [[ -f "$rpi_swap_conf" ]]; then
         log_info "Configuring rpi-swap to use ZRAM-only mechanism..."
-        local rpi_swap_conf="/etc/rpi/swap.conf"
-        
         # Disable hybrid swap by switching mechanism to zram
         if grep -q "^Mechanism=zram$" "$rpi_swap_conf"; then
             log_skip "rpi-swap mechanism already configured to zram"
@@ -1156,20 +1212,34 @@ optimize_memory() {
         fi
     fi
 
-    # 2. ZRAM Setup (systemd-zram-generator)
-    log_info "Configuring systemd-zram-generator..."
-    
+    # 2. ZRAM Setup — single swap manager policy.
+    #    On Trixie, rpi-swap (/etc/rpi/swap.conf) owns zram0. Our zram-generator.conf
+    #    would make zram-generator a competing manager for the same device, so it must
+    #    not exist alongside rpi-swap. The systemd-zram-generator package itself is kept:
+    #    rpi-swap's generated unit requires its systemd-zram-setup@.service template.
+    log_info "Configuring ZRAM swap..."
+
     # Remove zram-tools to avoid conflict
-    if command_exists apt-get && dpkg -l | grep -q "zram-tools"; then
+    if command_exists apt-get && dpkg -l 2>/dev/null | grep -q "zram-tools"; then
         log_info "Removing zram-tools conflict..."
         apt-get purge -y zram-tools >/dev/null 2>&1 || true
     fi
 
-    local zram_conf="/etc/systemd/zram-generator.conf"
-    local tmp_zram
-    tmp_zram=$(mktemp)
+    if [[ -f "$rpi_swap_conf" ]]; then
+        if [[ -f "$zram_conf" ]]; then
+            backup_file "$zram_conf"
+            rm -f "$zram_conf"
+            systemctl daemon-reload
+            log_pass "Removed zram-generator.conf — rpi-swap is now the sole zram manager"
+        else
+            log_skip "rpi-swap already the sole zram manager"
+        fi
+    else
+        # Legacy path: no rpi-swap on this OS — zram-generator manages zram directly
+        local tmp_zram
+        tmp_zram=$(mktemp)
 
-    cat > "$tmp_zram" << 'EOF'
+        cat > "$tmp_zram" << 'EOF'
 [zram0]
 zram-size = min(ram / 2, 4096)
 compression-algorithm = zstd
@@ -1177,14 +1247,16 @@ swap-priority = 100
 fs-type = swap
 EOF
 
-    if files_differ "$zram_conf" "$tmp_zram"; then
-        mv -f "$tmp_zram" "$zram_conf"
-        systemctl daemon-reload
-        systemctl start /dev/zram0 2>/dev/null || true
-        log_pass "systemd-zram-generator configured (zstd, 50% RAM up to 4G)"
-    else
-        rm "$tmp_zram"
-        log_skip "systemd-zram-generator already configured"
+        if files_differ "$zram_conf" "$tmp_zram"; then
+            mv -f "$tmp_zram" "$zram_conf"
+            chmod 0644 "$zram_conf"
+            systemctl daemon-reload
+            systemctl start /dev/zram0 2>/dev/null || true
+            log_pass "systemd-zram-generator configured (zstd, 50% RAM up to 4G)"
+        else
+            rm -f "$tmp_zram"
+            log_skip "systemd-zram-generator already configured"
+        fi
     fi
 
     # Ensure high swappiness for ZRAM
@@ -1201,7 +1273,7 @@ EOF
     # 16k page size systems benefit from 'madvise' to prevent fragmentation
     log_info "Optimizing Transparent Hugepages..."
     if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
-        echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled
+        echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || log_warn "Could not set THP at runtime"
         log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
         
         # Persist THP via tmpfiles.d
@@ -1309,7 +1381,11 @@ optimize_logs() {
             rm -f /etc/syslog.conf 2>/dev/null || true
             apt-get install -y rsyslog >/dev/null 2>&1 || true
             systemctl restart rsyslog 2>/dev/null || true
-            log_pass "Syslog restored to persistent rsyslog"
+            if command_exists rsyslogd && systemctl is-active --quiet rsyslog; then
+                log_pass "Syslog restored to persistent rsyslog"
+            else
+                log_warn "rsyslog restore failed (apt/network?) — logging may be degraded"
+            fi
         fi
         return
     fi
@@ -1331,6 +1407,7 @@ EOF
 
     if files_differ "$journal_conf" "$tmp_conf"; then
         mv -f "$tmp_conf" "$journal_conf"
+        chmod 0644 "$journal_conf"
         systemctl restart systemd-journald
         log_pass "Journald optimized for volatile storage"
     else
@@ -1362,83 +1439,126 @@ optimize_ollama_service() {
             log_pass "Ollama service enabled"
         fi
 
-        # --- Update Check ---
-        log_info "Checking for Ollama updates..."
-        local current_ver
-        current_ver=$(ollama --version 2>/dev/null | awk '{print $3}')
-        # Use a short timeout for the network call
-        local latest_ver
-        latest_ver=$(curl -s --max-time 3 https://api.github.com/repos/ollama/ollama/releases/latest | jq -r .tag_name 2>/dev/null | sed 's/^v//' || echo "")
+        # --- Update Check (interactive sessions only) ---
+        if [[ -t 0 ]]; then
+            log_info "Checking for Ollama updates..."
+            local current_ver
+            current_ver=$(ollama --version 2>/dev/null | awk '{print $3}')
+            # Use a short timeout for the network call
+            local latest_ver
+            latest_ver=$(curl -s --max-time 3 https://api.github.com/repos/ollama/ollama/releases/latest | jq -r .tag_name 2>/dev/null | sed 's/^v//' || echo "")
 
-        if [[ -n "$latest_ver" ]] && [[ -n "$current_ver" ]]; then
-            if [[ "$current_ver" != "$latest_ver" ]]; then
-                echo -e "${YELLOW}Update available: $current_ver -> $latest_ver${NC}"
-                if prompt_update "Do you want to update Ollama?"; then
-                    log_info "Updating Ollama..."
-                    if curl -fsSL https://ollama.com/install.sh | sh; then
-                        log_pass "Ollama updated to $latest_ver"
+            if [[ -n "$latest_ver" ]] && [[ -n "$current_ver" ]]; then
+                if [[ "$current_ver" != "$latest_ver" ]]; then
+                    echo -e "${YELLOW}Update available: $current_ver -> $latest_ver${NC}"
+                    if prompt_update "Do you want to update Ollama?"; then
+                        log_info "Updating Ollama..."
+                        if curl -fsSL https://ollama.com/install.sh | sh; then
+                            log_pass "Ollama updated to $latest_ver"
+                        else
+                            log_warn "Ollama update failed"
+                        fi
                     else
-                        log_warn "Ollama update failed"
+                        log_skip "Update skipped by user"
                     fi
                 else
-                    log_skip "Update skipped by user"
+                    log_pass "Ollama is up to date ($current_ver)"
                 fi
             else
-                log_pass "Ollama is up to date ($current_ver)"
+                log_warn "Could not check for Ollama updates (Network/API issue)"
             fi
         else
-            log_warn "Could not check for Ollama updates (Network/API issue)"
+            log_skip "Non-interactive session — skipping Ollama update check"
         fi
 
-        # Apply boot-order and permission fixes
+        # --- Service configuration (single owner of override.conf) ---
         local override_dir="/etc/systemd/system/ollama.service.d"
         local override_file="${override_dir}/override.conf"
-        
-        # Check if we are using USB storage
-        if [ -f "$override_file" ] && grep -q "/mnt/usb" "$override_file"; then
-            local models_dir
-            models_dir=$(awk -F'OLLAMA_MODELS=' '/OLLAMA_MODELS=/ {gsub(/"/, "", $2); print $2; exit}' "$override_file")
-            [ -z "$models_dir" ] && models_dir="/mnt/usb/ollama"
-            
-            if ! grep -q "RequiresMountsFor" "$override_file" || ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file"; then
-                log_info "Applying optimizations & boot-order fix to Ollama..."
-                # Extract existing Environment vars, filtering out ones we are about to add/enforce
-                local envs
-                envs=$(sed -nE '/Environment=/ { /OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS/!p }' "$override_file")
-                
-                cat > "$override_file" <<EOF
-[Unit]
-After=network-online.target
-RequiresMountsFor=${models_dir}
 
-[Service]
-${envs}
-Environment="OLLAMA_NUM_PARALLEL=1"
-Environment="OLLAMA_FLASH_ATTENTION=1"
-Environment="OLLAMA_KV_CACHE_TYPE=q4_0"
-Environment="OLLAMA_MAX_LOADED_MODELS=1"
-EOF
-                systemctl daemon-reload
-                log_pass "Ollama optimizations & boot-order fix applied"
+        # Resolve model storage location: existing override > USB (if roomy) > package default
+        local models_dir=""
+        if [ -f "$override_file" ]; then
+            models_dir=$(awk -F'OLLAMA_MODELS=' '/OLLAMA_MODELS=/ {gsub(/"/, "", $2); print $2; exit}' "$override_file")
+        fi
+        if [[ -z "$models_dir" && -d "${USB_MOUNT_POINT:-/mnt/usb}" ]] && mountpoint -q "${USB_MOUNT_POINT:-/mnt/usb}"; then
+            local avail_kb
+            avail_kb=$(df -Pk "${USB_MOUNT_POINT:-/mnt/usb}" 2>/dev/null | awk 'NR==2{print $4}')
+            if [[ -n "$avail_kb" && "$avail_kb" -ge $((8 * 1024 * 1024)) ]]; then
+                models_dir="${USB_MOUNT_POINT:-/mnt/usb}/ollama"
+                mkdir -p "$models_dir"
+                chown ollama:ollama "$models_dir" 2>/dev/null || true
+            else
+                log_warn "Only $((avail_kb / 1024 / 1024))GB free on ${USB_MOUNT_POINT:-/mnt/usb} (< 8GB) — keeping Ollama models on boot drive"
             fi
-            
-            # Ensure permissions
+        fi
+        [[ -z "$models_dir" ]] && models_dir="/usr/share/ollama/.ollama/models"
+
+        local on_usb=false
+        [[ "$models_dir" == "${USB_MOUNT_POINT:-/mnt/usb}"* ]] && on_usb=true
+
+        # Decide whether the managed override needs (re)writing
+        local need_write=false
+        if ! [ -f "$override_file" ]; then
+            need_write=true
+        elif ! grep -qE "OLLAMA_MODELS=\"?${models_dir}\"?\$" "$override_file" \
+           || ! grep -q "OLLAMA_NUM_PARALLEL" "$override_file" \
+           || { $on_usb && ! grep -q "Wants=mnt-usb.mount" "$override_file"; } \
+           || { ! $on_usb && grep -q "mnt-usb.mount" "$override_file"; }; then
+            need_write=true
+        fi
+
+        if $need_write; then
+            log_info "Applying Ollama service configuration (models: $models_dir)..."
+            mkdir -p "$override_dir"
+            # Preserve Environment lines we do not manage (e.g. OLLAMA_HOST, custom vars)
+            local envs=""
+            if [ -f "$override_file" ]; then
+                envs=$(sed -nE '/Environment=/ { /OLLAMA_NUM_PARALLEL|OLLAMA_FLASH_ATTENTION|OLLAMA_KV_CACHE_TYPE|OLLAMA_MAX_LOADED_MODELS|OLLAMA_MODELS/!p }' "$override_file")
+            fi
+            backup_file "$override_file"
+            {
+                if $on_usb; then
+                    # Soft dependency: warn-and-continue beats a failed service when USB is unplugged
+                    echo "[Unit]"
+                    echo "After=network-online.target mnt-usb.mount"
+                    echo "Wants=mnt-usb.mount"
+                else
+                    echo "[Unit]"
+                    echo "After=network-online.target"
+                fi
+                echo ""
+                echo "[Service]"
+                [[ -n "$envs" ]] && printf '%s\n' "$envs"
+                echo "Environment=\"OLLAMA_MODELS=${models_dir}\""
+                echo 'Environment="OLLAMA_KEEP_ALIVE=5m"'
+                echo 'Environment="OLLAMA_NUM_PARALLEL=1"'
+                echo 'Environment="OLLAMA_FLASH_ATTENTION=1"'
+                echo 'Environment="OLLAMA_KV_CACHE_TYPE=q4_0"'
+                echo 'Environment="OLLAMA_MAX_LOADED_MODELS=1"'
+            } > "$override_file"
+            chmod 0644 "$override_file"
+            systemctl daemon-reload
+            systemctl restart ollama 2>/dev/null || log_warn "Failed to restart ollama"
+            log_pass "Ollama service configured"
+        else
+            log_skip "Ollama service already configured"
+        fi
+
+        if systemctl is-active --quiet ollama; then
+            log_pass "Ollama service active"
+        else
+            log_warn "Ollama service not active. Check 'systemctl status ollama'"
+        fi
+
+        # Ensure permissions so the ollama user can write the USB mount (gid follows target user)
+        if $on_usb; then
             local target_user
             target_user=$(get_target_user)
-            # Attempt to use detected user
             if [[ -n "$target_user" && "$target_user" != "root" ]]; then
-                if ! groups ollama | grep -q "\b${target_user}\b"; then
-                    usermod -aG "$target_user" ollama
+                if ! id -nG ollama 2>/dev/null | grep -qw "$target_user"; then
+                    usermod -aG "$target_user" ollama || log_warn "Could not add ollama to group $target_user"
                     log_pass "Ollama user added to $target_user group for USB access"
                 fi
-            else
-                 # Fallback to 'rahul' if present, as in original script
-                 if id "rahul" &>/dev/null; then
-                     if ! groups ollama | grep -q "\brahul\b"; then
-                        usermod -aG rahul ollama
-                        log_pass "Ollama user added to rahul group for USB access"
-                     fi
-                 fi
             fi
         fi
     else
@@ -1574,9 +1694,13 @@ optimize_eeprom() {
 
 optimize_zsh() {
     log_section "ZSH OPTIMIZATION"
-    
+
     local target_user
     target_user=$(get_target_user)
+    if [[ "$target_user" == "root" ]]; then
+        log_warn "No non-root target user detected — skipping zsh optimization (would modify /root)"
+        return
+    fi
     local target_home
     target_home=$(getent passwd "$target_user" | cut -d: -f6)
     
@@ -1618,7 +1742,7 @@ EOF
     # 3. Zwc compile target user's .zshrc and custom plugins for faster load time
     log_info "Compiling Zsh config and custom plugins for faster loading..."
     if command_exists zsh; then
-        sudo -u "$target_user" zsh -c 'zcompile ~/.zshrc'
+        sudo -u "$target_user" zsh -c 'zcompile ~/.zshrc' 2>/dev/null || log_warn "zcompile of .zshrc failed"
         # Compile plugins if they exist
         local plugin_dir="${target_home}/.oh-my-zsh/custom/plugins"
         if [[ -d "$plugin_dir" ]]; then
@@ -1631,10 +1755,10 @@ EOF
             '
         fi
         log_pass "Zsh configurations successfully compiled to bytecode (.zwc)"
-        ((OPTIMIZATIONS_APPLIED++))
+        ((OPTIMIZATIONS_APPLIED++)) || true
     else
         log_warn "zsh command not found, cannot compile config files"
-        ((OPTIMIZATIONS_SKIPPED++))
+        ((OPTIMIZATIONS_SKIPPED++)) || true
     fi
 }
 
@@ -1650,10 +1774,10 @@ optimize_syncthing_autostart() {
         # Disable specifically for target_user
         sudo -u "$target_user" XDG_RUNTIME_DIR="/run/user/$(id -u "$target_user")" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$target_user")/bus" systemctl --user disable syncthing.service 2>/dev/null || true
         log_pass "Syncthing autostart disabled (running instances left active)"
-        ((OPTIMIZATIONS_APPLIED++))
+        ((OPTIMIZATIONS_APPLIED++)) || true
     else
         log_skip "systemctl not available, skipping Syncthing autostart optimization"
-        ((OPTIMIZATIONS_SKIPPED++))
+        ((OPTIMIZATIONS_SKIPPED++)) || true
     fi
 }
 
@@ -1665,28 +1789,35 @@ system_maintenance() {
     log_section "MAINTENANCE & SECURITY"
     
     log_info "Cleaning package cache..."
-    apt-get autoremove -y >/dev/null 2>&1
-    apt-get autoclean -y >/dev/null 2>&1
+    apt-get autoremove -y >/dev/null 2>&1 || true
+    apt-get autoclean -y >/dev/null 2>&1 || true
     log_pass "Apt cleanup complete"
 
-    # Firewall setup
+    # Firewall setup — one failing rule must not abort the remaining modules
     if command_exists ufw; then
-        ufw allow 22/tcp comment 'SSH Access' >/dev/null
-        ufw allow 80/tcp comment 'HTTP Web Traffic' >/dev/null
-        ufw allow 443/tcp comment 'HTTPS Secure Web Traffic' >/dev/null
+        ufw_rule() {
+            ufw "$@" >/dev/null 2>&1 || log_warn "ufw failed: $*"
+        }
+        ufw_rule allow 22/tcp comment 'SSH Access'
+        ufw_rule allow 80/tcp comment 'HTTP Web Traffic'
+        ufw_rule allow 443/tcp comment 'HTTPS Secure Web Traffic'
         # Allow Docker traffic
-        ufw allow in on docker0 comment 'Docker Bridge Interface' >/dev/null
+        ufw_rule allow in on docker0 comment 'Docker Bridge Interface'
         # Allow Jellyfin traffic (Web GUI & discovery)
-        ufw allow 8096/tcp comment 'Jellyfin Web GUI' >/dev/null
-        ufw allow 1900/udp comment 'Jellyfin DLNA Discovery' >/dev/null
-        ufw allow 7359/udp comment 'Jellyfin Client Discovery' >/dev/null
-        ufw allow from any proto igmp comment 'Allow IGMP Multicast Membership' >/dev/null
-        ufw allow to 224.0.0.0/4 comment 'Allow Multicast Destinations' >/dev/null
-        ufw allow from 224.0.0.0/4 comment 'Allow Multicast Sources' >/dev/null
+        ufw_rule allow 8096/tcp comment 'Jellyfin Web GUI'
+        ufw_rule allow 1900/udp comment 'Jellyfin DLNA Discovery'
+        ufw_rule allow 7359/udp comment 'Jellyfin Client Discovery'
+        ufw_rule allow from any proto igmp comment 'Allow IGMP Multicast Membership'
+        ufw_rule allow to 224.0.0.0/4 comment 'Allow Multicast Destinations'
+        ufw_rule allow from 224.0.0.0/4 comment 'Allow Multicast Sources'
         # Disable logging to save flash
-        ufw logging off >/dev/null
-        echo "y" | ufw enable >/dev/null
+        ufw_rule logging off
+        ufw --force enable >/dev/null 2>&1 || log_warn "Failed to enable UFW"
         log_pass "Firewall (UFW) configured (logging disabled)"
+        # NOTE: Docker published ports (-p) bypass UFW INPUT rules via the DOCKER chain.
+        # To restrict a container port, insert rules in the DOCKER-USER chain, e.g.:
+        #   iptables -I DOCKER-USER -i eth0 -p tcp --dport <port> -j DROP
+        # or publish ports bound to 127.0.0.1/tailscale0 only.
     fi
 
     log_info "Removing documentation to save space..."
@@ -1774,6 +1905,15 @@ main() {
     parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
     BOOT_TRAN=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
+
+    # TRAN can be empty for some device paths (PARTUUID=, LABEL=); fall back to name match
+    if [[ "$BOOT_TRAN" != "nvme" && "$parent_dev" == nvme* ]]; then
+        log_warn "Boot transport detection returned '${BOOT_TRAN:-empty}' for $parent_dev; forcing 'nvme'"
+        BOOT_TRAN="nvme"
+    elif [[ -z "${BOOT_TRAN:-}" ]]; then
+        log_warn "Could not detect boot drive transport (root=$boot_dev parent=$parent_dev); assuming flash media"
+        BOOT_TRAN="usb"
+    fi
     
     echo -e "${MAGENTA}"
     echo "██████╗ ██████╗ ██╗    ██████╗ ██████╗ ████████╗██╗███╗   ███╗██╗███████╗███████╗"

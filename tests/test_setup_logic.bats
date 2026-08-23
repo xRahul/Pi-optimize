@@ -11,7 +11,8 @@ export -f mock_dpkg_query
 
 setup() {
     # Prepare setup.sh
-    sed '$d' setup.sh > setup_no_main.sh
+    load helpers/setup
+    make_testable setup.sh setup_no_main.sh
     chmod +x setup_no_main.sh
 
     # Source it
@@ -39,7 +40,7 @@ echo "ii bash"
 EOF
     chmod +x test_bin/dpkg-query
 
-    # Mock apt-get as well in bin
+    # Mock apt-get as well in bin (called via the apt_get wrapper with lock timeout)
     cat << 'EOF' > test_bin/apt-get
 #!/bin/bash
 echo "MOCK_APT: $*"
@@ -55,11 +56,6 @@ teardown() {
     rm -rf test_bin
 }
 
-# Mock wait_for_apt_lock to avoid delay (function override works for main shell)
-wait_for_apt_lock() {
-    :
-}
-
 @test "system_core skips installed packages (e.g. curl)" {
     run system_core
     [ "$status" -eq 0 ]
@@ -71,7 +67,7 @@ wait_for_apt_lock() {
     run system_core
     [ "$status" -eq 0 ]
     [[ "$output" =~ "LOG_INFO: Installing vim..." ]]
-    [[ "$output" =~ "MOCK_APT: install -y vim" ]]
+    [[ "$output" =~ "MOCK_APT: -o DPkg::Lock::Timeout=300 install -y vim" ]]
 }
 
 @test "system_core detects conflict between busybox-syslogd and rsyslog" {

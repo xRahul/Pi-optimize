@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The **Raspberry Pi Home Server Optimization Suite (v4.6.0)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host. 
+The **Raspberry Pi Home Server Optimization Suite (v4.6.1)** is a "Pro Edition" automation suite designed specifically for the Raspberry Pi 5 running Debian Trixie (13) (Raspberry Pi OS Lite 64-bit). The project transforms a fresh OS installation into a hardened, high-performance, and flash-optimized Docker host.
 
 ## Gemini CLI "Pro" Setup (Optimization)
 
@@ -18,18 +18,19 @@ The Gemini CLI has been optimized for this environment with the following enhanc
 
 ### 3. Performance Tuning
 - **Parallelism**: `maxConcurrency` set to 5 for RPi 5.
-- **Context Management**: 
+- **Context Management**:
     - `maxSessionTurns`: 30
     - `truncateToolOutputThreshold`: 3000 (Prevents context bloat from long script logs).
     - `compressionThreshold`: 0.3
 
-## Building and Running
+## Design Guarantees
 
 *   **Idempotency & Reliability:** Scripts can be safely run multiple times. Includes lock files and trap handlers.
 *   **Performance:** Configures CPU governor to `performance`, aggressive cooling fan curves, and BBR network congestion control.
-*   **Flash Longevity:** Disables disk-based swap (uses ZRAM by default), sets up `noatime` mounts, RAM-based logging (`busybox-syslogd`), and volatile journald to reduce SD card/USB wear. On NVMe systems, configures a static SSD swapfile for memory overflow.
-*   **Security:** Integrated UFW firewall management and kernel hardening.
-*   **Storage Optimization:** BFQ I/O scheduler and optimized USB auto-mounting for Docker data.
+*   **Flash Longevity:** Disables disk-based swap on flash media (ZRAM only), sets up `noatime` mounts, and volatile journald to reduce SD card/USB wear. On NVMe systems, persistent `rsyslog` logging is deliberately kept (SSDs tolerate writes) and a static SSD swapfile handles memory overflow.
+*   **Swap Management:** On Debian Trixie, `rpi-swap` is the single swap manager (zram via `/etc/rpi/swap.conf`); the suite never lets `systemd-zram-generator` compete with it.
+*   **Security:** Integrated UFW firewall management (managed rules), Fail2Ban installed with distro defaults, and kernel hardening.
+*   **Storage Optimization:** BFQ I/O scheduler for rotational USB drives (persisted via udev rule) and optimized USB auto-mounting for Docker data.
 
 ## Building and Running
 

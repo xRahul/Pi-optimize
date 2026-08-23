@@ -14,7 +14,8 @@ setup() {
     touch "$MOCK_DIR/lib/utils.sh"
 
     # Prepare optimize.sh for sourcing
-    sed '$d' optimize.sh > "$MOCK_DIR/optimize_testable.sh"
+    load helpers/setup
+    make_testable optimize.sh "$MOCK_DIR/optimize_testable.sh"
 
     # Replace /etc/fstab with a mock file path to allow writing
     sed -i "s|/etc/fstab|${MOCK_DIR}/fstab|g" "$MOCK_DIR/optimize_testable.sh"

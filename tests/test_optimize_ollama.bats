@@ -118,6 +118,8 @@ confirm_action() { return 1; } # Default to no for interactive prompts
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 files_differ() { return 0; }
 backup_file() { :; }
+get_target_user() { echo "testuser"; }
+mountpoint() { return 0; }
 EOF
 
     # Create a mock override file with some content to test parsing
@@ -153,7 +155,7 @@ teardown() {
     [ "$status" -eq 0 ]
 
     # Check if the function attempted to apply optimizations
-    [[ "$output" =~ "LOG_INFO: Applying optimizations & boot-order fix to Ollama..." ]]
+    [[ "$output" =~ "LOG_INFO: Applying Ollama service configuration" ]]
 
     # Read the file to verify content
     run cat "$OVERRIDE_FILE"

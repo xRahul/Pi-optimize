@@ -9,6 +9,8 @@
 
 # --- Strict Mode ---
 set -u
+set -o pipefail
+export LC_ALL=C
 # We don't use 'set -e' to allow the script to continue after a failed check
 
 # --- Source Library ---
@@ -23,7 +25,6 @@ fi
 
 # --- Constants ---
 SCRIPT_VERSION="4.6.1"
-LOG_FILE="/var/log/rpi-diag.log"
 USB_MOUNT_POINT="/mnt/usb"
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
 
@@ -66,7 +67,7 @@ log_section_diag() {
 
 report_pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((CHECKS_PASSED++))
+    ((CHECKS_PASSED++)) || true
 }
 
 report_warn() {
@@ -74,8 +75,7 @@ report_warn() {
     local sol="${2:-}"
     [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
     WARN_LIST+=("$1|$sol")
-    ((WARNINGS++))
-    TOTAL_SCORE=$((TOTAL_SCORE - 5))
+    ((WARNINGS++)) || true
 }
 
 report_fail() {
@@ -83,8 +83,7 @@ report_fail() {
     local sol="${2:-}"
     [ -n "$sol" ] && echo -e "${GREY}       ↳ Solution: $sol${NC}"
     ERROR_LIST+=("$1|$sol")
-    ((ERRORS++))
-    TOTAL_SCORE=$((TOTAL_SCORE - 20))
+    ((ERRORS++)) || true
 }
 
 report_info() {
@@ -184,11 +183,16 @@ check_hardware() {
     # Throttling & Power
     if command_exists vcgencmd; then
         local throttled
-        throttled=$(vcgencmd get_throttled | cut -d= -f2)
-        if [ "$throttled" == "0x0" ]; then
-            report_pass "Power/Throttling: Status OK (0x0)"
+        throttled=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+        if [[ "$throttled" =~ ^0x[0-9a-fA-F]+$ ]]; then
+            # bash arithmetic parses 0x-prefixed values natively (handles padded hex too)
+            if (( throttled == 0 )); then
+                report_pass "Power/Throttling: Status OK ($throttled)"
+            else
+                report_fail "Throttling Detected: Code $throttled" "Check power supply (need 5V/5A for Pi 5) or cooling."
+            fi
         else
-            report_fail "Throttling Detected: Code $throttled" "Check power supply (need 5V/5A for Pi 5) or cooling."
+            report_warn "Power/Throttling: could not read status (vcgencmd returned '${throttled:-empty}')"
         fi
 
         # Voltage (Core)
@@ -214,7 +218,8 @@ check_hardware() {
             lnksta=$(lspci -s "$nvme_addr" -vv 2>/dev/null | grep "LnkSta:" | head -n1 || echo "")
             if [[ -n "$lnksta" ]]; then
                 if [[ "$lnksta" == *"Speed 8GT/s"* ]]; then
-                    report_pass "PCIe Link Speed: Gen 3 (8GT/s) active"
+                    # Gen 3 works but conflicts with the suite's endurance policy (see config.txt check below)
+                    report_info "PCIe Link Speed: Gen 3 (8GT/s) active — suite policy prefers Gen 2 for endurance"
                 elif [[ "$lnksta" == *"Speed 5GT/s"* ]]; then
                     report_pass "PCIe Link Speed: Gen 2 (5GT/s) active (optimal for endurance)"
                 else
@@ -264,8 +269,8 @@ check_hardware() {
         # Check GPU Memory
         if echo "$config_content" | grep -q "^gpu_mem="; then
             local gmem
-            gmem=$(echo "$config_content" | grep "^gpu_mem=" | cut -d= -f2 || echo "")
-            if [[ "$gmem" -le 16 ]]; then
+            gmem=$(echo "$config_content" | grep "^gpu_mem=" | cut -d= -f2 | tr -d '[:space:]')
+            if [[ "$gmem" =~ ^[0-9]+$ ]] && [[ "$gmem" -le 16 ]]; then
                 report_pass "Boot Config: GPU Memory split optimized ($gmem MB)"
             else
                 report_warn "Boot Config: GPU Memory split is $gmem MB" "Run optimize.sh to reduce to 16MB for headless server."
@@ -400,7 +405,7 @@ check_resources() {
         if [ "$swappiness" -le 10 ]; then
             report_pass "Swappiness: $swappiness (Optimal for Flash protection)"
         else
-            report_warn "Swappiness: $swappiness (High for disk swap)" "Run optimize.sh to reduce to 10."
+            report_warn "Swappiness: $swappiness (High for disk swap)" "Run optimize.sh to configure ZRAM (swappiness follows the swap mechanism)."
         fi
     fi
 
@@ -440,11 +445,13 @@ check_resources() {
         report_pass "ZRAM Swap: Active"
         if [[ -f /etc/systemd/zram-generator.conf ]]; then
              report_pass "ZRAM Config: systemd-zram-generator detected"
+        elif [[ -f /etc/rpi/swap.conf ]] && grep -q "^Mechanism=zram" /etc/rpi/swap.conf 2>/dev/null; then
+             report_pass "ZRAM Config: rpi-swap (zram mechanism) detected"
         fi
         if command_exists zramctl; then
             local z_orig z_comp
-            z_orig=$(zramctl --noheadings --output DATA | awk '{sum+=$1} END {print sum/1024/1024}')
-            z_comp=$(zramctl --noheadings --output COMPR | awk '{sum+=$1} END {print sum/1024/1024}')
+            z_orig=$(zramctl --bytes --noheadings --output DATA | awk '{sum+=$1} END {print sum/1048576}')
+            z_comp=$(zramctl --bytes --noheadings --output COMPR | awk '{sum+=$1} END {print sum/1048576}')
             report_info "ZRAM Stats: $(printf "%.1f" "$z_orig")MB compressed to $(printf "%.1f" "$z_comp")MB"
         fi
     fi
@@ -462,7 +469,7 @@ check_resources() {
 
     # Overall swap assessment
     if [[ $zram_active -eq 0 && $swapfile_active -eq 0 ]]; then
-        if grep -q "partition" /proc/swaps || grep -q "file" /proc/swaps; then
+        if awk 'NR>1 && $1 !~ /^\/dev\/zram/ && ($2=="partition" || $2=="file")' /proc/swaps | grep -q .; then
             report_warn "Swap: Non-standard disk-based swap active" "Run optimize.sh to configure ZRAM."
         else
             report_warn "Swap: No swap active" "ZRAM is recommended for stability."
@@ -553,7 +560,7 @@ check_storage() {
     # Root Filesystem
     local root_usage
     root_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
-    if [ "$root_usage" -lt 85 ]; then
+    if [[ "$root_usage" =~ ^[0-9]+$ ]] && [ "$root_usage" -lt 85 ]; then
         report_pass "Root Partition: ${root_usage}% used"
     else
         report_fail "Root Partition: ${root_usage}% used (Critical)" "Clean up logs or docker images."
@@ -601,12 +608,11 @@ check_storage() {
              report_warn "Filesystem: VFAT/ExFAT detected" "Not recommended for Docker. Consider formatting to EXT4 for reliability."
         fi
 
-        # Write Test (Non-destructive check if writable)
-        if touch "$USB_MOUNT_POINT/.diag_test" 2>/dev/null; then
-            rm "$USB_MOUNT_POINT/.diag_test"
-            report_pass "Write Access: OK"
+        # Write Test — read-only check via mount flags (no writes to a production data drive)
+        if [[ ",${fs_opts:-rw}," == *",ro,"* ]]; then
+            report_fail "Write Access: FAILED" "Drive is mounted read-only or permissions wrong."
         else
-            report_fail "Write Access: FAILED" "Drive might be read-only or permissions wrong."
+            report_pass "Write Access: OK (mounted rw)"
         fi
 
     else
@@ -656,9 +662,9 @@ check_storage() {
                 dtypes=("nvme" "${dtypes[@]}")
             fi
             for dtype in "${dtypes[@]}"; do
-                local dflag=""
-                [[ -n "$dtype" ]] && dflag="-d $dtype"
-                smart_status=$(smartctl $dflag -H "$disk_dev" 2>/dev/null | \
+                local dflag=()
+                [[ -n "$dtype" ]] && dflag=(-d "$dtype")
+                smart_status=$(timeout 15 smartctl "${dflag[@]}" -H "$disk_dev" 2>/dev/null | \
                     grep -iE "test result|Health Status|overall-health" | head -1 | \
                     grep -ioE "(PASSED|FAILED|OK)")
                 [[ -n "$smart_status" ]] && break
@@ -724,7 +730,11 @@ check_docker() {
 
     # Fetch Docker Info Once
     local docker_info
-    docker_info=$(docker info --format '{{.DockerRootDir}}|{{.LoggingDriver}}')
+    docker_info=$(timeout 15 docker info --format '{{.DockerRootDir}}|{{.LoggingDriver}}' 2>/dev/null)
+    if [[ -z "$docker_info" || "$docker_info" == "|"* ]]; then
+        report_warn "Docker: could not query daemon info (permissions or wedged daemon)" "Run with sudo; check 'sudo systemctl status docker'."
+        return
+    fi
     local data_root log_driver
     IFS='|' read -r data_root log_driver <<< "$docker_info"
 
@@ -821,7 +831,7 @@ check_network() {
 
     # DNS
     if command_exists nslookup; then
-        if nslookup google.com >/dev/null 2>&1; then
+        if timeout 5 nslookup google.com >/dev/null 2>&1; then
             report_pass "DNS: Working"
         else
             report_fail "DNS: Resolution failed" "Check /etc/resolv.conf"
@@ -874,12 +884,15 @@ check_network() {
 
     # Firewall
     if command_exists ufw; then
-        local ufw_status
-        ufw_status=$(ufw status | grep "Status" | awk '{print $2}')
-        if [ "$ufw_status" == "active" ]; then
+        local ufw_output
+        ufw_output=$(timeout 10 ufw status 2>/dev/null)
+        if [[ -z "$ufw_output" ]]; then
+            report_warn "Firewall (UFW): could not read status"
+        elif [[ "$(echo "$ufw_output" | grep "Status" | awk '{print $2}')" == "active" ]]; then
             report_pass "Firewall (UFW): Active"
-            # Check for Jellyfin rules (Web GUI & discovery)
-            if ufw status | grep -qE "8096/tcp.*ALLOW" && ufw status | grep -qE "1900/udp.*ALLOW" && ufw status | grep -qE "7359/udp.*ALLOW" && ufw status | grep -qiE "igmp.*ALLOW" && ufw status | grep -qE "224.0.0.0/4.*ALLOW"; then
+            # Check for Jellyfin rules (Web GUI & discovery).
+            # IGMP: ufw renders `allow from any proto igmp` with the proto AFTER ALLOW.
+            if echo "$ufw_output" | grep -qE "8096/tcp.*ALLOW" && echo "$ufw_output" | grep -qE "1900/udp.*ALLOW" && echo "$ufw_output" | grep -qE "7359/udp.*ALLOW" && echo "$ufw_output" | grep -qiE "ALLOW.*igmp" && echo "$ufw_output" | grep -qE "224.0.0.0/4.*ALLOW"; then
                 report_pass "Firewall Rules: Jellyfin Web, Discovery Ports, IGMP, & Multicast (8096/tcp, 1900/udp, 7359/udp, IGMP, 224.0.0.0/4) ALLOWED"
             else
                 report_warn "Firewall Rules: Jellyfin & Multicast Ports/Protocols (8096/tcp, 1900/udp, 7359/udp, IGMP, 224.0.0.0/4) INCOMPLETE" "Run optimize.sh to apply fix."
@@ -911,17 +924,20 @@ check_network() {
     if command_exists ethtool; then
         local gro_ok=true
         local checked_ifaces=()
-        for iface in eth0 wlan0; do
-            if [[ -d "/sys/class/net/$iface" ]]; then
-                checked_ifaces+=("$iface")
-                if ! ethtool -k "$iface" 2>/dev/null | grep -q "rx-udp-gro-forwarding: on"; then
-                    gro_ok=false
-                fi
+        local iface
+        for iface in /sys/class/net/*; do
+            [[ -d "$iface" ]] || continue
+            iface=$(basename "$iface")
+            # Skip loopback and virtual interfaces
+            [[ "$iface" == "lo" || "$iface" == docker0 || "$iface" == veth* || "$iface" == tailscale* || "$iface" == br-* || "$iface" == wg* ]] && continue
+            checked_ifaces+=("$iface")
+            if ! ethtool -k "$iface" 2>/dev/null | grep -q "rx-udp-gro-forwarding: on"; then
+                gro_ok=false
             fi
         done
-        
+
         if [[ ${#checked_ifaces[@]} -eq 0 ]]; then
-            report_info "UDP GRO Forwarding: No eth0/wlan0 interfaces found to check"
+            report_info "UDP GRO Forwarding: No physical network interfaces found to check"
         elif [[ "$gro_ok" == "true" ]]; then
             report_pass "Host UDP GRO Forwarding: Enabled on ${checked_ifaces[*]}"
         else
@@ -932,8 +948,13 @@ check_network() {
     fi
 
     # UDP GRO Forwarding (Tailscale Container)
-    if command_exists docker && [[ -n "$(docker ps -q -f 'name=^tailscale$')" ]]; then
-        if docker exec tailscale ethtool -k eth0 2>/dev/null | grep -q "rx-udp-gro-forwarding: on"; then
+    if command_exists docker && [[ -n "$(timeout 15 docker ps -q -f 'name=^tailscale$' 2>/dev/null)" ]]; then
+        local gro_out
+        gro_out=$(timeout 10 docker exec tailscale ethtool -k eth0 2>/dev/null)
+        if [[ -z "$gro_out" ]]; then
+            # ethtool not installed inside the container — cannot verify, not a failure
+            report_info "Tailscale UDP GRO Forwarding: cannot verify (ethtool missing inside container)"
+        elif echo "$gro_out" | grep -q "rx-udp-gro-forwarding: on"; then
             report_pass "Tailscale UDP GRO Forwarding: Enabled inside container namespace"
         else
             report_fail "Tailscale UDP GRO Forwarding: Disabled or suboptimal inside container namespace" "Check entrypoint configuration in docker-compose.yml."
@@ -1045,7 +1066,7 @@ check_system_services() {
         local uv_bin="${target_home}/.local/bin/uv"
         if [[ -f "$uv_bin" ]]; then
             local uv_ver
-            uv_ver=$(sudo -u "$target_user" "$uv_bin" self version 2>/dev/null | awk '{print $2}')
+            uv_ver=$(timeout 10 sudo -u "$target_user" -H "$uv_bin" --version 2>/dev/null | awk '{print $2}')
             report_pass "Tooling: uv (Python) $uv_ver"
         else
             report_warn "Tooling: uv not installed" "Run setup.sh to install."
@@ -1158,8 +1179,8 @@ check_zsh_suite() {
     
     local start_time
     start_time=$(date +%s%N)
-    # Run zsh in interactive login mode and exit
-    sudo -u "$target_user" zsh -i -c exit >/dev/null 2>&1
+    # Run zsh in interactive login mode and exit (bounded so a hung .zshrc can't stall the run)
+    timeout 10 sudo -u "$target_user" zsh -i -c exit >/dev/null 2>&1
     local end_time
     end_time=$(date +%s%N)
     
@@ -1193,8 +1214,12 @@ main() {
 
     log_section_diag "DIAGNOSTIC SUMMARY"
     
-    # Ensure score doesn't go below 0
-    [ "$TOTAL_SCORE" -lt 0 ] && TOTAL_SCORE=0
+    # Normalized score over the checks actually run (pass=1, warn=0.5, fail=0),
+    # so scores are comparable across machines regardless of how many checks applied.
+    local total_checks=$((CHECKS_PASSED + WARNINGS + ERRORS))
+    if [ "$total_checks" -gt 0 ]; then
+        TOTAL_SCORE=$(( (200 * CHECKS_PASSED + 100 * WARNINGS) / (2 * total_checks) ))
+    fi
 
     echo -e "Health Score:  ${CYAN}${TOTAL_SCORE}%${NC}"
     echo -e "Checks Passed: ${GREEN}$CHECKS_PASSED${NC}"
@@ -1228,9 +1253,23 @@ main() {
     else
         echo -e "\n${YELLOW}SYSTEM FUNCTIONAL BUT OPTIMIZABLE.${NC}"
     fi
-    
-    echo -e "Log saved to: $LOG_FILE"
+
+    # Non-zero exit so automation can detect a failed diagnostic run
+    [ "$ERRORS" -gt 0 ] && return 1
+    return 0
 }
 
-# Redirect output to log file while showing on screen
-main 2>&1 | tee "$LOG_FILE"
+# --- Entry point (only when executed directly, not when sourced by tests) ---
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    # Redirect output to log file while showing on screen.
+    # LOG_FILE is intentionally NOT exported into the pipeline: lib/utils.sh log helpers
+    # would tee to it directly AND those same bytes flow through the outer tee, duplicating lines.
+    require_root
+    unset LOG_FILE
+    DIAG_LOG_FILE="/var/log/rpi-diag.log"
+    install -m 600 /dev/null "$DIAG_LOG_FILE"
+    main 2>&1 | tee "$DIAG_LOG_FILE"
+    rc=("${PIPESTATUS[@]}")
+    echo "Log saved to: $DIAG_LOG_FILE"
+    exit "${rc[0]}"
+fi

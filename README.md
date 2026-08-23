@@ -1,4 +1,4 @@
-# 🥧 Raspberry Pi Home Server Optimization Suite (v4.6.0)
+# 🥧 Raspberry Pi Home Server Optimization Suite (v4.6.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Pi 5](https://img.shields.io/badge/Platform-Raspberry%20Pi%205-red.svg)]()
@@ -8,7 +8,7 @@ A "Pro Edition" automation suite designed exclusively for the **Raspberry Pi 5**
 
 ---
 
-## 🚀 The "Ultimate Edition" (v4.6.0)
+## 🚀 The "Ultimate Edition" (v4.6.1)
 
 This suite is not just a collection of scripts; it's a comprehensive system state management tool. It prioritizes **Flash Longevity**, **IO Performance**, and **System Stability**.
 
@@ -16,7 +16,7 @@ This suite is not just a collection of scripts; it's a comprehensive system stat
 *   **Triple-Threat Flash Protection**: Extreme measures to prevent SD Card/USB Flash wear.
 *   **RPi 5 Native Tuning**: Leverages Pi 5 specific features like PCIe Gen 2 (for maximum stability/endurance) and advanced thermal management.
 *   **Idempotent Execution**: Safely run any script multiple times; it only applies what's missing.
-*   **Production Hardening**: Includes UFW firewall, Fail2Ban, and Kernel-level security tweaks.
+*   **Production Hardening**: Includes UFW firewall (managed rules) and Fail2Ban (installed with distro defaults; sshd jail auto-enabled).
 *   **Local AI Ready**: Optimized support for Ollama (Local LLMs) with CPU-specific tuning.
 
 ---
@@ -25,14 +25,14 @@ This suite is not just a collection of scripts; it's a comprehensive system stat
 
 ### 🛡️ Flash Media Protection (The "Triple-Threat")
 Flash storage (SD/USB) is the #1 failure point for Pi servers. We mitigate this with three layers:
-1.  **Volatile Logging**: `busybox-syslogd` and `systemd-journald` are configured for **RAM-only storage**, drastically reducing constant disk writes.
-2.  **ZRAM Swap & NVMe Hybrid Swap**: Disk-based swap is completely purged on flash/USB media. However, if an NVMe boot drive is detected, a 4GB static swapfile (priority 10) is initialized on the SSD to handle extreme memory overflow. All configurations use ZRAM with `zstd` compression and `vm.swappiness=150` to ensure standard memory pressure is handled in-RAM.
-3.  **The Enforcer**: A systemd timer (`disk-swap-enforcer`) runs hourly to ensure no rogue services (like `dphys-swapfile`) have re-enabled swap on flash drives.
+1.  **Media-Aware Logging**: On flash boots, `systemd-journald` runs volatile (RAM-only) and `busybox-syslogd` is installed for RAM-only syslog *unless rsyslog is already present* (the suite never removes a working syslog on its own). On NVMe boots, persistent `rsyslog` logging is deliberately kept — SSDs tolerate writes.
+2.  **ZRAM Swap & NVMe Hybrid Swap**: Disk-based swap is purged on flash/USB media. On an NVMe boot drive, a 4GB static swapfile (priority 10) handles memory overflow alongside ZRAM (`zstd`, `vm.swappiness=150`). On Debian Trixie, `rpi-swap` is the single swap manager; the suite removes any competing `zram-generator.conf`.
+3.  **The Enforcer**: A systemd timer (`disk-swap-enforcer`) runs hourly on flash systems to ensure no rogue services (like `dphys-swapfile`) have re-enabled swap.
 
 ### ⚡ Performance & IO Tuning
 *   **CPU Governor**: Persistent `performance` mode for maximum throughput.
-*   **IO Scheduler**: Forces **BFQ** for USB drives, ensuring Docker containers aren't blocked by background writes.
-*   **Network Stack**: Enables **TCP BBR** congestion control and optimizes sysctl for 16k page sizes (Pi 5 default).
+*   **IO Scheduler**: Forces **BFQ** for rotational USB drives and `none` for NVMe — applied at runtime *and* persisted via a udev rule so it survives reboots.
+*   **Network Stack**: Enables **TCP BBR** congestion control, loose `rp_filter` (Tailscale/failover-safe), and sysctl tuned for 16k page sizes (Pi 5 default).
 *   **PCIe Config**: Forces stable **PCIe Gen 2** connection and configures an aggressive fan curve (starts at 35°C) to prevent thermal throttling.
 
 ### ⛓️ System Resilience
@@ -53,9 +53,9 @@ The entry point for a new system. It handles:
 ### ⚡ `optimize.sh` (The Tuner)
 The heart of the suite. It applies:
 *   **Kernel Hardening**: Protects against common network attacks via `sysctl`.
-*   **ZRAM Optimization**: Configures `systemd-zram-generator` with optimal Pi 5 settings.
+*   **ZRAM Optimization**: Single swap-manager policy — `rpi-swap` owns zram on Trixie; competing generators are removed.
 *   **Docker Daemon Tuning**: Enables `live-restore`, `json-file` log rotation, and optimized data-root paths.
-*   **Security**: Configures UFW with specific rules for internal Docker networking and n8n/Ollama connectivity.
+*   **Security**: Configures UFW with specific rules for internal Docker networking and n8n/Ollama connectivity. Note: Docker published ports (`-p`) bypass UFW INPUT rules via the DOCKER chain — restrict them via the `DOCKER-USER` iptables chain or bind to localhost/tailscale only. Ollama binds to `127.0.0.1` by default (v4.6.1+); existing overrides that set `OLLAMA_HOST=0.0.0.0` are preserved — an unauthenticated model API on your LAN is a deliberate choice, not a default.
 
 ### 🩺 `diag.sh` (The Auditor)
 A senior engineer in a script. It checks:
@@ -77,7 +77,7 @@ A senior engineer in a script. It checks:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/pi-optimize.git
+git clone <your-fork-url> pi-optimize
 cd pi-optimize
 
 # 2. Run the Setup (Requires Sudo)
