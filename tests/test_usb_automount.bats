@@ -48,9 +48,9 @@ setup() {
 #!/bin/bash
 # Usage: blkid -s TAG -o value DEVICE
 if [[ "$2" == "UUID" ]]; then
-    echo "UUID-1234"
+    echo "${MOCK_BLKID_UUID:-UUID-1234}"
 elif [[ "$2" == "TYPE" ]]; then
-    echo "ext4"
+    echo "${MOCK_BLKID_TYPE:-ext4}"
 else
     echo "mock-value"
 fi
@@ -140,4 +140,48 @@ teardown() {
 
     echo "Output: $output"
     [[ "$output" == *"LOG_PASS: USB mount added to fstab"* ]]
+}
+
+@test "setup_usb_automount configures exfat options correctly" {
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda"
+    export MOCK_BLKID_TYPE="exfat"
+    export MOCK_BLKID_UUID="9063-18C1"
+
+    run setup_usb_automount
+
+    echo "Output: $output"
+    [[ "$output" == *"LOG_PASS: USB mount added to fstab (UUID: 9063-18C1, Type: exfat)"* ]]
+    fstab_content=$(cat "$MOCK_DIR/fstab")
+    echo "Fstab: $fstab_content"
+    [[ "$fstab_content" == *"UUID=9063-18C1  /mnt/usb  exfat  defaults,nofail,noatime,uid=1000,gid=1000,umask=002,iocharset=utf8,errors=remount-ro  0  0"* ]]
+    [[ "$fstab_content" != *",utf8,"* && "$fstab_content" != *" utf8 "* && "$fstab_content" != *",utf8 "* ]]
+}
+
+@test "setup_usb_automount updates existing fstab entry when UUID changes" {
+    echo -e "# Old drive\nUUID=OLD-UUID-1111  /mnt/usb  vfat  defaults  0  0" > "$MOCK_DIR/fstab"
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda"
+    export MOCK_BLKID_TYPE="exfat"
+    export MOCK_BLKID_UUID="NEW-UUID-2222"
+
+    run setup_usb_automount
+
+    echo "Output: $output"
+    [[ "$output" == *"LOG_PASS: USB mount updated in fstab (UUID: NEW-UUID-2222, Type: exfat)"* ]]
+    fstab_content=$(cat "$MOCK_DIR/fstab")
+    echo "Fstab: $fstab_content"
+    [[ "$fstab_content" == *"# Old drive"* ]]
+    [[ "$fstab_content" == *"UUID=NEW-UUID-2222  /mnt/usb  exfat  "* ]]
+    [[ "$fstab_content" != *"OLD-UUID-1111"* ]]
+}
+
+@test "setup_usb_automount skips when exact UUID and mount point already in fstab" {
+    echo -e "UUID=EXISTING-1234  /mnt/usb  exfat  defaults  0  0" > "$MOCK_DIR/fstab"
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda"
+    export MOCK_BLKID_TYPE="exfat"
+    export MOCK_BLKID_UUID="EXISTING-1234"
+
+    run setup_usb_automount
+
+    echo "Output: $output"
+    [[ "$output" == *"LOG_SKIP: USB mount already configured in fstab"* ]]
 }

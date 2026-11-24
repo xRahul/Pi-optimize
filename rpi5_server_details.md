@@ -33,7 +33,8 @@ This document compiles the hardware, operating system, network, storage, swap, a
     *   **Device:** `/dev/sda1` (External USB bridge drive, labeled `BACKUP` or custom label).
     *   **Size:** Varies depending on storage requirements.
     *   **Mount Point:** `/mnt/usb` (dynamically handled by the setup suite).
-    *   **Filesystem:** `vfat` (configured as standard FAT32) or `ext4`.
+    *   **Filesystem:** `exfat` (recommended for cross-platform Android/Windows support without 4GB file limits), `vfat`, or `ext4`.
+    *   **Mount Options:** `defaults,nofail,noatime,uid=1000,gid=1000,umask=002,iocharset=utf8,errors=remount-ro` (configured to prevent flash wear/overheating and ensure read-write compatibility).
     *   **SMART Status:** Supported (checked via appropriate driver flags depending on the USB bridge).
 
 ---

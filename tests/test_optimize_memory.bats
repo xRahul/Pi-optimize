@@ -36,7 +36,7 @@ EOF
     chmod +x "$MOCK_DIR/bin/swapon"
 
     # Mock mkswap/fallocate/dd so an accidental creation path stays sandboxed
-    for c in mkswap fallocate dd swapoff; do
+    for c in mkswap fallocate dd swapoff systemctl; do
         printf '#!/bin/bash\nexit 0\n' > "$MOCK_DIR/bin/$c"
         chmod +x "$MOCK_DIR/bin/$c"
     done

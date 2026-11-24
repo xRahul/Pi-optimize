@@ -115,7 +115,7 @@ add_cmdline_param() {
 
 optimize_hardware() {
     log_section "HARDWARE & THERMAL"
-    
+
     [[ -f "$CONFIG_FILE" ]] || log_error "$CONFIG_FILE not found"
 
     backup_file "$CONFIG_FILE"
@@ -126,21 +126,21 @@ optimize_hardware() {
         return
     fi
 
-    # Pi 5 Aggressive Cooling
+    # Pi 5 Quiet Cooling
     if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
         log_skip "Fan curve already configured"
     else
-        log_info "Applying aggressive fan curve (35°C start)..."
+        log_info "Applying quiet fan curve (50°C start)..."
         # Ensure newline before appending
         echo "" >> "$CONFIG_FILE"
         cat >> "$CONFIG_FILE" << 'EOF'
 
 # Active Cooling for Pi 5
-dtparam=fan_temp0=35000
+dtparam=fan_temp0=50000
 dtparam=fan_temp0_hyst=5000
-dtparam=fan_temp0_speed=125
-dtparam=fan_temp1=50000
-dtparam=fan_temp1_speed=200
+dtparam=fan_temp0_speed=75
+dtparam=fan_temp1=60000
+dtparam=fan_temp1_speed=125
 EOF
         log_pass "Fan curve optimized"
     fi
@@ -283,7 +283,7 @@ EOF
         echo "dtparam=watchdog=on" >> "$CONFIG_FILE"
         log_pass "Hardware watchdog enabled in config.txt"
     fi
-    
+
     if command_exists systemctl; then
         systemctl enable --now watchdog 2>/dev/null || log_warn "Watchdog service failed to start"
     fi
@@ -297,7 +297,7 @@ EOF
 ################################################################################
 optimize_cpu() {
     log_section "CPU & PERFORMANCE"
-    
+
     local current_gov=""
     if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
         current_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
@@ -347,7 +347,7 @@ EOF
 
 optimize_storage() {
     log_section "STORAGE & I/O"
-    
+
     local fstab_file="${FSTAB_FILE:-/etc/fstab}"
     backup_file "$fstab_file"
 
@@ -438,7 +438,7 @@ optimize_storage() {
     # 2c. Persistent scheduler selection via udev (runtime echoes above are lost at reboot)
     local udev_dir="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
     local udev_sched_rule="$udev_dir/60-rpi-io-scheduler.rules"
-    local desired_rule='ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"\nACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme*", ATTR{queue/scheduler}="none"'
+    local desired_rule='ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"\nACTION=="add|change", SUBSYSTEM=="block", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"'
     if [[ ! -f "$udev_sched_rule" ]] || ! printf '%b\n' "$desired_rule" | cmp -s - "$udev_sched_rule"; then
         printf '%b\n' "$desired_rule" > "$udev_sched_rule"
         chmod 0644 "$udev_sched_rule"
@@ -479,11 +479,11 @@ optimize_storage() {
 
 optimize_kernel() {
     log_section "KERNEL TUNING"
-    
+
     local sysctl_conf="/etc/sysctl.d/99-server-optimize.conf"
     local tmp_conf
     tmp_conf=$(mktemp)
-    
+
     cat > "$tmp_conf" << 'EOF'
 # Memory Management (Tuned for 16k pages & ZRAM)
 vm.dirty_ratio=15
@@ -545,7 +545,7 @@ EOF
     if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
         echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || true
         log_pass "MGLRU thrashing threshold optimized"
-        
+
         # Persist MGLRU min_ttl_ms via tmpfiles.d
         local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
         mkdir -p /etc/tmpfiles.d
@@ -613,7 +613,7 @@ RemainAfterExit=yes
 EOF
 
     for iface in "${interfaces[@]}"; do
-        echo "ExecStart=/sbin/ethtool -K $iface rx-udp-gro-forwarding on rx-gro-list off" >> "$tmp_service"
+        echo "ExecStart=-/sbin/ethtool -K $iface rx-udp-gro-forwarding on rx-gro-list off" >> "$tmp_service"
     done
 
     cat >> "$tmp_service" << EOF
@@ -646,10 +646,10 @@ EOF
 
 setup_usb_automount() {
     log_section "USB AUTO-MOUNT"
-    
+
     local mount_path="/mnt/usb"
     local fstab_file="/etc/fstab"
-    
+
     # Create mount directory if it doesn't exist
     if [[ ! -d "$mount_path" ]]; then
         mkdir -p "$mount_path"
@@ -657,9 +657,9 @@ setup_usb_automount() {
     else
         log_skip "Mount directory already exists: $mount_path"
     fi
-    
+
     # Check if USB device needs to be added to fstab
-    
+
     # Identify root device to exclude it
     local root_dev
     root_dev=$(findmnt -n -o SOURCE /)
@@ -673,58 +673,74 @@ setup_usb_automount() {
     local usb_device
     usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
         awk -v root="$root_disk" '/usb|sd|mmc/ && /part/ && !index($0, root) { print $1; exit }')
-    
+
     if [[ -z "$usb_device" ]]; then
         log_warn "No USB device detected. Manual fstab configuration may be required."
         return
     fi
-    
+
     # Get UUID of the USB device
     local usb_dev_path="/dev/$usb_device"
     if [[ ! -b "$usb_dev_path" ]]; then
         log_warn "USB device $usb_dev_path not found"
         return
     fi
-    
+
     local usb_uuid
     usb_uuid=$(blkid -s UUID -o value "$usb_dev_path" 2>/dev/null)
     if [[ -z "$usb_uuid" ]]; then
         log_warn "Could not determine UUID for $usb_dev_path. Manual configuration required."
         return
     fi
-    
-    # Check if already in fstab by UUID or Mount Point
-    if grep -q "UUID=$usb_uuid" "$fstab_file"; then
+
+    # Detect filesystem type
+    local fs_type
+    fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
+
+    # Add appropriate mount options based on filesystem
+    local mount_opts="defaults,nofail,noatime"
+    local fs_pass="0"
+    if [[ "$fs_type" == "ext4" ]]; then
+        # Optimization for flash storage: commit=60 reduces write frequency
+        mount_opts="defaults,nofail,noatime,commit=60"
+        fs_pass="2"
+    elif [[ "$fs_type" == "vfat" ]]; then
+        mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,umask=002,utf8"
+    elif [[ "$fs_type" == "exfat" ]]; then
+        mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,umask=002,iocharset=utf8,errors=remount-ro"
+    fi
+
+    local new_entry="UUID=$usb_uuid  $mount_path  $fs_type  $mount_opts  0  $fs_pass"
+
+    # Check if already in fstab by exact UUID and Mount Point
+    if grep -qE "^UUID=${usb_uuid}[[:space:]]+${mount_path}[[:space:]]" "$fstab_file"; then
         log_skip "USB mount already configured in fstab (UUID: $usb_uuid)"
-    elif grep -q "[[:space:]]${mount_path}[[:space:]]" "$fstab_file"; then
-        log_warn "Mount point $mount_path already exists in fstab with a different UUID. Skipping to avoid conflicts."
     else
         backup_file "$fstab_file"
-        
-        # Detect filesystem type
-        local fs_type
-        fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
-        
-        # Add appropriate mount options based on filesystem
-        local mount_opts="defaults,nofail,noatime"
-        if [[ "$fs_type" == "ext4" ]]; then
-            # Optimization for flash storage: commit=60 reduces write frequency
-            mount_opts="defaults,nofail,noatime,commit=60"
-        elif [[ "$fs_type" == "vfat" || "$fs_type" == "exfat" ]]; then
-            mount_opts="defaults,nofail,noatime,uid=1000,gid=1000,umask=002,utf8"
+        if grep -qE "^[^#]*[[:space:]]${mount_path}[[:space:]]" "$fstab_file"; then
+            sed -i "\|^[^#]*[[:space:]]${mount_path}[[:space:]]|c\\${new_entry}" "$fstab_file"
+            log_pass "USB mount updated in fstab (UUID: $usb_uuid, Type: $fs_type)"
+        else
+            echo "$new_entry" >> "$fstab_file"
+            log_pass "USB mount added to fstab (UUID: $usb_uuid, Type: $fs_type)"
         fi
-        
-        echo "UUID=$usb_uuid  $mount_path  $fs_type  $mount_opts  0  2" >> "$fstab_file"
-        log_pass "USB mount added to fstab (UUID: $usb_uuid, Type: $fs_type)"
+
+        # Unmount from any temporary desktop auto-mount location before mounting to target
+        local existing_mount
+        existing_mount=$(findmnt -n -o TARGET "$usb_dev_path" 2>/dev/null || true)
+        if [[ -n "$existing_mount" && "$existing_mount" != "$mount_path" && "$existing_mount" == /media/* ]]; then
+            log_info "Unmounting temporary desktop mount ($existing_mount)..."
+            umount "$existing_mount" 2>/dev/null || true
+        fi
 
         # Attempt to mount immediately so subsequent checks pass
         if mount "$mount_path" 2>/dev/null; then
             log_pass "$mount_path mounted"
         else
-            log_warn "fstab entry added but immediate mount failed (device busy/absent?) — will retry at boot"
+            log_warn "fstab entry configured but immediate mount failed (device busy/absent?) — will retry at boot"
         fi
     fi
-    
+
     # Create systemd mount override to ensure Docker waits
     mkdir -p /etc/systemd/system/docker.service.d
     if [[ ! -f /etc/systemd/system/docker.service.d/usb-mount.conf ]]; then
@@ -744,7 +760,7 @@ EOF
 
 optimize_docker() {
     log_section "DOCKER OPTIMIZATION"
-    
+
     if ! command_exists docker; then
         log_skip "Docker not installed"
         return
@@ -802,14 +818,14 @@ optimize_docker() {
             current_json=$(jq -S . "$docker_config")
             local new_json
             new_json=$(jq -S -s '.[0] * .[1]' "$docker_config" <(echo "$final_config"))
-            
+
             if [[ "$current_json" == "$new_json" ]]; then
                 log_skip "Docker daemon.json already optimized"
             else
                 log_info "Merging with existing daemon.json..."
                 echo "$new_json" > "$docker_config"
                 log_pass "Docker daemon.json optimized (merged)"
-                
+
                 systemctl daemon-reload
                 # shellcheck disable=SC2015
                 systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
@@ -820,7 +836,7 @@ optimize_docker() {
     else
         echo "$final_config" > "$docker_config"
         log_pass "Docker daemon.json optimized (created)"
-        
+
         systemctl daemon-reload
         # shellcheck disable=SC2015
         systemctl is-active --quiet docker && systemctl restart docker || log_warn "Failed to restart Docker (may not be running yet)"
@@ -842,14 +858,14 @@ setup_docker_compose_restart() {
     # Determine real user and home
     local target_user
     target_user=$(get_target_user)
-    
+
     local target_home
     if command_exists getent; then
         target_home=$(getent passwd "$target_user" | cut -d: -f6)
     else
         target_home="/home/$target_user"
     fi
-    
+
     local docker_dir="${target_home}/docker"
 
     if [[ ! -d "$docker_dir" ]]; then
@@ -859,10 +875,10 @@ setup_docker_compose_restart() {
 
     local service_file="/etc/systemd/system/docker-compose-restart.service"
 
-    # Legacy units (inline command instead of restart.sh) get upgraded below rather
-    # than skipped forever — diag.sh would otherwise warn about them permanently.
-    if [[ -f "$service_file" ]] && ! grep -q "restart.sh" "$service_file"; then
-        log_info "Legacy docker-compose-restart unit detected — will upgrade"
+    # Legacy units (inline command instead of restart.sh) or units with circular multi-user.target dependency
+    # get upgraded below rather than skipped forever — diag.sh would otherwise warn about them permanently.
+    if [[ -f "$service_file" ]] && (! grep -q "restart.sh" "$service_file" || grep -q "After=.*multi-user\.target" "$service_file"); then
+        log_info "Legacy or cyclic docker-compose-restart unit detected — will upgrade"
         rm -f "$service_file"
     elif [[ -f "$service_file" ]]; then
         log_skip "Docker compose auto-restart service already exists."
@@ -881,7 +897,7 @@ setup_docker_compose_restart() {
 [Unit]
 Description=Restart Docker Compose services in $docker_dir on boot
 Requires=docker.service
-After=docker.service network-online.target multi-user.target
+After=docker.service network-online.target
 Wants=network-online.target
 
 [Service]
@@ -908,67 +924,7 @@ EOF
 }
 
 ################################################################################
-# 5a. Tailscale Fix
-################################################################################
-
-fix_tailscale_race() {
-    log_section "TAILSCALE CONNECTIVITY FIX"
-
-    if ! command_exists docker; then
-        log_skip "Docker not installed"
-        return
-    fi
-
-    # Check if tailscale container exists (running or stopped); guard against daemon garbage
-    local ts_out
-    ts_out=$(timeout 15 docker ps -a -q -f name='^tailscale$' 2>/dev/null) || ts_out=""
-    if [[ -z "$ts_out" ]]; then
-        log_skip "Tailscale container not found. Skipping fix."
-        return
-    fi
-
-    local service_file="/etc/systemd/system/tailscale-fix.service"
-    local tmp_service
-    tmp_service=$(mktemp)
-
-    # Write desired state to temp file first, then compare for idempotency
-    cat > "$tmp_service" << 'EOF'
-[Unit]
-Description=Fix Tailscale Connectivity on Boot
-After=docker.service network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-# Wait for internet connectivity (check default gateway)
-ExecStartPre=/bin/bash -c 'gw=$(ip route | grep default | cut -d" " -f3 | head -n1); for i in {1..30}; do ping -c1 -W2 "$gw" >/dev/null 2>&1 && break; sleep 2; done'
-ExecStart=/usr/bin/docker restart tailscale
-RemainAfterExit=yes
-TimeoutStartSec=300
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    if files_differ "$service_file" "$tmp_service"; then
-        mv -f "$tmp_service" "$service_file"
-        chmod 0644 "$service_file"
-        systemctl daemon-reload
-        log_pass "Tailscale boot fix service updated"
-    else
-        rm "$tmp_service"
-        log_skip "Tailscale boot fix already configured"
-    fi
-
-    # Ensure it's enabled regardless (idempotent)
-    # shellcheck disable=SC2015
-    systemctl enable tailscale-fix.service 2>/dev/null \
-        && log_pass "Tailscale boot fix enabled" \
-        || log_warn "Failed to enable Tailscale boot fix"
-}
-
-################################################################################
-# 5b. Daily Graceful Reboot
+# 5a. Daily Graceful Reboot
 ################################################################################
 
 setup_daily_reboot() {
@@ -977,7 +933,7 @@ setup_daily_reboot() {
     local reboot_script="/usr/local/bin/graceful-reboot"
     local reboot_service="/etc/systemd/system/rpi-daily-reboot.service"
     local reboot_timer="/etc/systemd/system/rpi-daily-reboot.timer"
-    
+
     local target_user
     target_user=$(get_target_user)
     local target_home
@@ -1071,7 +1027,7 @@ optimize_memory() {
 
     # 1. Disable Disk-based Swap (Permanent for flash, hybrid/overflow for NVMe)
     log_info "Configuring swap settings..."
-    
+
     # Disable and purge dphys-swapfile (Raspberry Pi default)
     if command_exists dphys-swapfile; then
         log_info "Removing dphys-swapfile..."
@@ -1094,7 +1050,7 @@ optimize_memory() {
 
     if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
         log_info "NVMe boot detected. Configuring 4GB static swapfile for memory overflow..."
-        
+
         # Disable fstab swap entries that are NOT our swapfile
         if grep -E "^[^#].*\sswap\s" "$fstab_file" | grep -v "$swapfile_path" >/dev/null; then
             sed -i "\|$swapfile_path|!{/^[^#]/ {/\sswap\s/ s/^/#/}}" "$fstab_file"
@@ -1184,30 +1140,30 @@ optimize_memory() {
         # Safely detach loop device if it holds a deleted swap file
         if losetup -a 2>/dev/null | grep -q "/var/swap (deleted)"; then
             log_info "Detaching locked /var/swap (deleted) to reclaim space..."
-            
+
             # 1. Deactivate zram swap (it may have a backing_dev pointing at the loop)
             swapoff /dev/zram0 2>/dev/null || true
             zramctl --reset /dev/zram0 2>/dev/null || true
-            
+
             # 2. Find and detach the specific loop device holding the deleted file
             local loop_dev
             loop_dev=$(losetup -a 2>/dev/null | grep "/var/swap (deleted)" | cut -d: -f1 | head -n1)
             if [[ -n "$loop_dev" ]]; then
                 losetup -d "$loop_dev" 2>/dev/null || true
             fi
-            
+
             # 3. Clear any failed state from old units before restarting
             systemctl reset-failed systemd-zram-setup@zram0.service 2>/dev/null || true
             systemctl reset-failed rpi-zram-writeback.timer 2>/dev/null || true
             systemctl reset-failed rpi-setup-loop@var-swap.service 2>/dev/null || true
-            
+
             # 4. Reload generators so they regenerate zram-only config (no loop dependency)
             systemctl daemon-reload
-            
+
             # 5. Start zram device AND activate swap on it
             systemctl start systemd-zram-setup@zram0.service 2>/dev/null || true
             systemctl start dev-zram0.swap 2>/dev/null || true
-            
+
             log_pass "Locked swap file detached, ZRAM restarted, disk space reclaimed"
         fi
     fi
@@ -1275,7 +1231,7 @@ EOF
     if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
         echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || log_warn "Could not set THP at runtime"
         log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
-        
+
         # Persist THP via tmpfiles.d
         local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
         mkdir -p /etc/tmpfiles.d
@@ -1373,7 +1329,7 @@ optimize_logs() {
         else
             log_skip "Journald logging is already persistent"
         fi
-        
+
         # If busybox-syslogd is installed, purge it and install rsyslog to restore persistent syslog
         if command_exists dpkg && dpkg -l | grep -q "busybox-syslogd"; then
             log_info "NVMe boot detected. Removing busybox-syslogd and restoring rsyslog for persistent syslog..."
@@ -1395,7 +1351,7 @@ optimize_logs() {
     local journal_conf="${journal_conf_dir}/optimize.conf"
     local tmp_conf
     tmp_conf=$(mktemp)
-    
+
     mkdir -p "$journal_conf_dir"
     cat > "$tmp_conf" << 'EOF'
 [Journal]
@@ -1703,14 +1659,14 @@ optimize_zsh() {
     fi
     local target_home
     target_home=$(getent passwd "$target_user" | cut -d: -f6)
-    
+
     local zshrc="${target_home}/.zshrc"
-    
+
     if [[ ! -f "$zshrc" ]]; then
         log_skip "No .zshrc found for user ${target_user}. Skipping Zsh optimizations."
         return
     fi
-    
+
     # 1. Enable OMZ update reminder instead of auto update blocking
     if grep -q "zstyle ':omz:update' mode" "$zshrc"; then
         # Uncomment and set mode to reminder
@@ -1787,7 +1743,7 @@ optimize_syncthing_autostart() {
 
 system_maintenance() {
     log_section "MAINTENANCE & SECURITY"
-    
+
     log_info "Cleaning package cache..."
     apt-get autoremove -y >/dev/null 2>&1 || true
     apt-get autoclean -y >/dev/null 2>&1 || true
@@ -1897,7 +1853,7 @@ main() {
     require_root
     acquire_lock
     ensure_dependencies
-    
+
     # Boot Drive Detection
     local boot_dev
     boot_dev=$(findmnt -n -o SOURCE /)
@@ -1914,7 +1870,7 @@ main() {
         log_warn "Could not detect boot drive transport (root=$boot_dev parent=$parent_dev); assuming flash media"
         BOOT_TRAN="usb"
     fi
-    
+
     echo -e "${MAGENTA}"
     echo "██████╗ ██████╗ ██╗    ██████╗ ██████╗ ████████╗██╗███╗   ███╗██╗███████╗███████╗"
     echo "██╔══██╗██╔══██╗██║    ██╔══██╗██╔══██╗╚══██╔══╝██║████╗ ████║██║╚══███╔╝██╔════╝"
@@ -1932,7 +1888,7 @@ main() {
         log_info "Boot Drive: ${BOOT_TRAN:-Unknown}. Applying standard flash-wear optimizations."
     fi
     log_info "Started at: $(date)"
-    
+
     # Run modules
     optimize_hardware
     optimize_cpu
@@ -1941,7 +1897,6 @@ main() {
     optimize_network
     setup_usb_automount
     optimize_docker
-    fix_tailscale_race
     setup_docker_compose_restart
     setup_daily_reboot
     optimize_memory
@@ -1952,13 +1907,13 @@ main() {
     optimize_eeprom
     optimize_zsh
     system_maintenance
-    
+
     # Summary
     log_section "OPTIMIZATION SUMMARY"
     log_success "Applied: $OPTIMIZATIONS_APPLIED"
     log_info "Skipped: $OPTIMIZATIONS_SKIPPED"
     log_warn "Warnings: $WARNINGS"
-    
+
     if [[ $ERRORS -gt 0 ]]; then
         log_error "Errors: $ERRORS"
     fi

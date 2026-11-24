@@ -33,11 +33,10 @@ Flash storage (SD/USB) is the #1 failure point for Pi servers. We mitigate this 
 *   **CPU Governor**: Persistent `performance` mode for maximum throughput.
 *   **IO Scheduler**: Forces **BFQ** for rotational USB drives and `none` for NVMe — applied at runtime *and* persisted via a udev rule so it survives reboots.
 *   **Network Stack**: Enables **TCP BBR** congestion control, loose `rp_filter` (Tailscale/failover-safe), and sysctl tuned for 16k page sizes (Pi 5 default).
-*   **PCIe Config**: Forces stable **PCIe Gen 2** connection and configures an aggressive fan curve (starts at 35°C) to prevent thermal throttling.
+*   **PCIe Config**: Forces stable **PCIe Gen 2** connection and configures a quiet fan curve (starts at 50°C) to prevent thermal throttling without idle noise.
 
 ### ⛓️ System Resilience
 *   **`startup-mounts.service`**: A custom "one-shot" service that ensures all USB filesystems are successfully mounted *before* the Docker daemon starts, preventing container startup failures.
-*   **`tailscale-fix.service`**: Solves a common RPi 5 race condition where Tailscale starts before the network is fully up, leading to routing failures.
 
 ---
 

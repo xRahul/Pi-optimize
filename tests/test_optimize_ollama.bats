@@ -37,18 +37,6 @@ fi
 EOF
     chmod +x "$MOCK_DIR/bin/jq"
 
-    # Mock docker
-    cat << 'EOF' > "$MOCK_DIR/bin/docker"
-#!/bin/bash
-if [[ "$*" == *"ps -a -q -f name=^tailscale$"* ]]; then
-    if [[ -n "$MOCK_TAILSCALE_EXISTS" ]]; then
-        echo "a1b2c3d4e5f6"
-    fi
-fi
-exit 0
-EOF
-    chmod +x "$MOCK_DIR/bin/docker"
-
     # Mock systemctl
     cat << 'EOF' > "$MOCK_DIR/bin/systemctl"
 #!/bin/bash
@@ -175,21 +163,4 @@ teardown() {
     [[ "$output" == *'Environment="OLLAMA_HOST=0.0.0.0"'* ]]
     # Verify OLLAMA_FLASH_ATTENTION is 1
     [[ "$output" == *'Environment="OLLAMA_FLASH_ATTENTION=1"'* ]]
-}
-
-@test "fix_tailscale_race applies fix when container exists" {
-    # Mock docker child process reads this from the environment (exported in setup)
-    MOCK_TAILSCALE_EXISTS="1"
-    run fix_tailscale_race
-    echo "$output"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"LOG_PASS: Tailscale boot fix enabled"* ]]
-}
-
-@test "fix_tailscale_race skips when container does not exist" {
-    MOCK_TAILSCALE_EXISTS=""
-    run fix_tailscale_race
-    echo "$output"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"LOG_SKIP: Tailscale container not found"* ]]
 }

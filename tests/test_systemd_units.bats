@@ -86,7 +86,7 @@ teardown() {
 
     service_file="$MOCK_DIR/etc/systemd/system/rpi5-udp-gro.service"
     run cat "$service_file"
-    [[ "$output" == *"ExecStart=/sbin/ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off"* ]]
+    [[ "$output" == *"ExecStart=-/sbin/ethtool -K eth0 rx-udp-gro-forwarding on rx-gro-list off"* ]]
 
     run stat -c "%a" "$service_file"
     [ "$output" = "644" ]

@@ -1179,8 +1179,8 @@ check_zsh_suite() {
     
     local start_time
     start_time=$(date +%s%N)
-    # Run zsh in interactive login mode and exit (bounded so a hung .zshrc can't stall the run)
-    timeout 10 sudo -u "$target_user" zsh -i -c exit >/dev/null 2>&1
+    # Run zsh in interactive mode with --foreground so job control doesn't suspend it
+    timeout --foreground 5 sudo -u "$target_user" zsh -i -c exit >/dev/null 2>&1
     local end_time
     end_time=$(date +%s%N)
     
