@@ -136,6 +136,20 @@ is_less() {
     float_to_int "$2" n2
     (( n1 < n2 ))
 }
+# Extract Celsius temperature from `nvme smart-log` output.
+# Handles "temperature : 41 °C (314 K)" and Kelvin-only "temperature : 315 K".
+# Anchored to the composite "temperature :" line so sensor lines are ignored.
+# substr() yields a plain string in mawk, so coerce with +0 before the >150 check.
+parse_nvme_temp() {
+    awk -F: '/^temperature[[:space:]]*:/ {
+        if (match($2, /[0-9]+/)) {
+            val = substr($2, RSTART, RLENGTH) + 0
+            if (val > 150) val -= 273
+            print val
+            exit
+        }
+    }'
+}
 
 ################################################################################
 # 1. Hardware Health (Pi 5 Specific)
@@ -157,6 +171,16 @@ check_hardware() {
         local fw_version
         fw_version=$(vcgencmd version | head -n 1)
         report_info "Firmware: $fw_version"
+    fi
+    # Hardware watchdog: systemd PID1 is the sole owner of /dev/watchdog0
+    if command_exists systemctl; then
+        local wd_secs
+        wd_secs=$(systemctl show -p RuntimeWatchdogUSec 2>/dev/null | cut -d= -f2)
+        if [[ -n "$wd_secs" && "$wd_secs" != "0" && "$wd_secs" != "infinity" ]]; then
+            report_pass "Watchdog: armed by systemd ($wd_secs)"
+        else
+            report_warn "Watchdog: not armed by systemd" "Set RuntimeWatchdogSec in /etc/systemd/system.conf.d/watchdog.conf"
+        fi
     fi
 
     # Temperature
@@ -688,8 +712,8 @@ check_storage() {
                 local nvme_log
                 nvme_log=$(nvme smart-log "$disk_dev" 2>/dev/null || true)
                 if [[ -n "$nvme_log" ]]; then
-                    local temp wear spare errors
-                    temp=$(echo "$nvme_log" | awk -F: '/temperature/ { if (match($0, /[0-9]+[ ]*C/)) { val = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", val); print val } else { match($0, /[0-9]+/); val = substr($0, RSTART, RLENGTH); if (val > 150) print val - 273; else print val } }')
+                    local temp
+                    temp=$(printf '%s\n' "$nvme_log" | parse_nvme_temp)
                     wear=$(echo "$nvme_log" | awk -F: '/percentage_used/ {gsub(/[^0-9]/,"",$2); print $2}')
                     spare=$(echo "$nvme_log" | awk -F: '/available_spare/ {if(!/threshold/) {gsub(/[^0-9]/,"",$2); print $2}}')
                     errors=$(echo "$nvme_log" | awk -F: '/media_errors/ {gsub(/[^0-9]/,"",$2); print $2}')

@@ -38,16 +38,25 @@ setup() {
     echo '#!/bin/bash' > "$MOCK_DIR/bin/systemctl"
     chmod +x "$MOCK_DIR/bin/systemctl"
 
-    # Mock findmnt to return root source
-    echo '#!/bin/bash' > "$MOCK_DIR/bin/findmnt"
-    echo 'echo /dev/mmcblk0p2' >> "$MOCK_DIR/bin/findmnt"
+    # Mock findmnt: root query returns the SD root, /mnt/usb query is configurable
+    cat << 'EOF' > "$MOCK_DIR/bin/findmnt"
+#!/bin/bash
+if [[ "$*" == *"/mnt/usb"* ]]; then
+    echo "${MOCK_FINDMNT_USB:-}"
+else
+    echo /dev/mmcblk0p2
+fi
+EOF
     chmod +x "$MOCK_DIR/bin/findmnt"
+    export MOCK_FINDMNT_USB=""
 
-    # Mock blkid - handle both UUID and TYPE queries
+    # Mock blkid - handle both UUID and TYPE queries (sdb1 can differ per test)
     cat << 'EOF' > "$MOCK_DIR/bin/blkid"
 #!/bin/bash
 # Usage: blkid -s TAG -o value DEVICE
-if [[ "$2" == "UUID" ]]; then
+if [[ "$*" == *"sdb1"* ]]; then
+    echo "${MOCK_BLKID_UUID_SDB:-UUID-SDB}"
+elif [[ "$2" == "UUID" ]]; then
     echo "${MOCK_BLKID_UUID:-UUID-1234}"
 elif [[ "$2" == "TYPE" ]]; then
     echo "${MOCK_BLKID_TYPE:-ext4}"
@@ -184,4 +193,31 @@ teardown() {
 
     echo "Output: $output"
     [[ "$output" == *"LOG_SKIP: USB mount already configured in fstab"* ]]
+}
+
+@test "setup_usb_automount pins to the mounted device when another USB disk is listed first" {
+    # Backup HDD (sda1) sorts first, but /mnt/usb is sdb1 and must stay pinned to it
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda\nsdb1 usb part sdb"
+    export MOCK_FINDMNT_USB="/dev/sdb1"
+    export MOCK_BLKID_UUID_SDB="GOOD-UUID"
+    export MOCK_BLKID_UUID="BAD-UUID"
+    export MOCK_BLKID_TYPE="exfat"
+    echo "UUID=GOOD-UUID  /mnt/usb  exfat  defaults,nofail,noatime  0  0" > "$MOCK_DIR/fstab"
+
+    run setup_usb_automount
+
+    echo "Output: $output"
+    [[ "$output" == *"LOG_SKIP: USB mount already configured in fstab (UUID: GOOD-UUID)"* ]]
+    ! grep -q "BAD-UUID" "$MOCK_DIR/fstab"
+}
+
+@test "setup_usb_automount refuses to guess when multiple USB disks and mount not in fstab" {
+    LSBLK_OUTPUT="mmcblk0p1 mmc part mmcblk0\nsda1 usb part sda\nsdb1 usb part sdb"
+    export MOCK_FINDMNT_USB=""
+
+    run setup_usb_automount
+
+    echo "Output: $output"
+    [[ "$output" == *"LOG_WARN: Multiple USB partitions found"* ]]
+    [ ! -s "$MOCK_DIR/fstab" ]
 }

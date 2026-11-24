@@ -109,8 +109,8 @@ system_core() {
     
     local packages=(
         "ca-certificates" "curl" "gnupg" "git" "jq" "bc" 
-        "usbutils" "util-linux" "watchdog" "e2fsprogs" 
-        "smartmontools" "cpufrequtils" "systemd-zram-generator" "fail2ban" "ufw"
+        "usbutils" "util-linux" "e2fsprogs" 
+        "smartmontools" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
         "bats" "network-manager" "ethtool" "zsh"
     )
@@ -178,7 +178,7 @@ docker_suite() {
     fi
     log_pass "Docker installed: $(docker --version)"
     
-    systemctl enable --now docker
+    systemctl enable --now docker 2>/dev/null || log_warn "Docker service could not be enabled/started"
     
     local target_user
     target_user=$(get_target_user)
@@ -197,7 +197,7 @@ docker_suite() {
 nodejs_tooling() {
     log_section "NODE.JS & TOOLING"
     
-    # Node >= 22 required (Jod LTS); distro node 18/20 does not satisfy this
+    # Node >= 22 required; distro node 18/20 does not satisfy this
     local installed_major
     installed_major=$(node -v 2>/dev/null | sed -n 's/^v\([0-9]\+\).*/\1/p' || true)
     if [[ -z "$installed_major" || "$installed_major" -lt 22 ]]; then
@@ -212,8 +212,8 @@ nodejs_tooling() {
         mkdir -p /etc/apt/keyrings
         curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
 
-        # Node 22 (Jod) is the current LTS as of 2025/2026
-        local node_major="22"
+        # Node 26 is Active LTS as of Nov 2026; gate above keeps an existing newer major
+        local node_major="26"
         echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list
 
         apt_get update

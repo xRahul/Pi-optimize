@@ -8,6 +8,8 @@ This comprehensive reference document summarizes technical learnings, configurat
 
 The Raspberry Pi 5 is officially rated and certified for **PCIe Gen 2.0** speeds (5 GT/s, yielding up to ~450 MB/s). However, the hardware supports **PCIe Gen 3.0** (8 GT/s, yielding up to ~900 MB/s), which can be forced via configuration.
 
+> **Status note (2026):** Gen 3 remains officially unwarranted. The stock suite forces Gen 2 (`dtparam=pciex1_gen=2`) for stability and low power. Treat the Gen 3 block below as *experimental*: test your own board, cable and SSD, and revert on any link error or data corruption.
+
 ### Configuration (`/boot/firmware/config.txt`)
 To enable the PCIe interface and force Gen 3.0 speeds, append the following to `/boot/firmware/config.txt` under the `[pi5]` filter section:
 
@@ -254,16 +256,21 @@ Since a headless server does not drive a monitor or graphical interface, you can
 *(Note: On 4GB/8GB Pi 5 models, this frees up minor memory but is a solid best-practice for maximum RAM availability).*
 
 ### Cap Journald Log Growth
-To prevent system logs from growing unbounded and wearing down flash storage or taking up valuable NVMe SSD space:
-1. Edit `/etc/systemd/journald.conf`.
-2. Uncomment/configure:
+Journald is configured through a drop-in, never by editing the vendor file:
+1. Create `/etc/systemd/journald.conf.d/optimize.conf`:
    ```ini
-   SystemMaxUse=100M
+   [Journal]
+   Storage=persistent
+   SystemMaxUse=1G
+   SystemMaxFileSize=100M
+   Compress=yes
    ```
-3. Restart the service:
+2. Restart the service:
    ```bash
    sudo systemctl restart systemd-journald
    ```
+3. Verify with `systemd-analyze cat-config systemd/journald.conf` and `journalctl --header`.
+   Some Debian 13 images force RAM journals regardless; in that case `/var/log/syslog` (rsyslog) is the durable history.
 
 ### RAM Disk Offloading for `/tmp` and `/var/tmp`
 Move frequently written temporary files out of persistent storage and into volatile memory (`tmpfs`). This speeds up I/O and reduces wear on flash devices:

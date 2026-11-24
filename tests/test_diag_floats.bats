@@ -83,3 +83,18 @@ setup() {
     run is_greater "80." "79.99"
     [ "$status" -eq 0 ]
 }
+
+@test "parse_nvme_temp parses degree-celsius composite line" {
+    out=$(printf 'temperature\t\t\t: 41 °C (314 K)\n' | parse_nvme_temp)
+    [ "$out" = "41" ]
+}
+
+@test "parse_nvme_temp converts kelvin-only output" {
+    out=$(printf 'temperature : 315 K\n' | parse_nvme_temp)
+    [ "$out" = "42" ]
+}
+
+@test "parse_nvme_temp ignores sensor lines and negative artifacts" {
+    out=$(printf 'Temperature Sensor 1 : 46 °C (319 K)\ntemperature : 41 °C (314 K)\n' | parse_nvme_temp)
+    [ "$out" = "41" ]
+}

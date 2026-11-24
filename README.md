@@ -25,7 +25,7 @@ This suite is not just a collection of scripts; it's a comprehensive system stat
 
 ### 🛡️ Flash Media Protection (The "Triple-Threat")
 Flash storage (SD/USB) is the #1 failure point for Pi servers. We mitigate this with three layers:
-1.  **Media-Aware Logging**: On flash boots, `systemd-journald` runs volatile (RAM-only) and `busybox-syslogd` is installed for RAM-only syslog *unless rsyslog is already present* (the suite never removes a working syslog on its own). On NVMe boots, persistent `rsyslog` logging is deliberately kept — SSDs tolerate writes.
+1.  **Media-Aware Logging**: On flash boots, `systemd-journald` runs volatile (RAM-only) and `busybox-syslogd` is installed for RAM-only syslog *unless rsyslog is already present* (the suite never removes a working syslog on its own). On NVMe boots the suite requests persistent journald (`Storage=persistent`, 1G cap) and keeps `rsyslog`; if the platform forces RAM journals (Debian 13 journald 257 on Pi 5 does), `/var/log/syslog` remains the durable log.
 2.  **ZRAM Swap & NVMe Hybrid Swap**: Disk-based swap is purged on flash/USB media. On an NVMe boot drive, a 4GB static swapfile (priority 10) handles memory overflow alongside ZRAM (`zstd`, `vm.swappiness=150`). On Debian Trixie, `rpi-swap` is the single swap manager; the suite removes any competing `zram-generator.conf`.
 3.  **The Enforcer**: A systemd timer (`disk-swap-enforcer`) runs hourly on flash systems to ensure no rogue services (like `dphys-swapfile`) have re-enabled swap.
 
@@ -95,7 +95,7 @@ sudo ./diag.sh
 A: With ZRAM, a high swappiness value is actually better. It encourages the kernel to move idle pages into compressed RAM early, leaving more "real" RAM for active processes.
 
 **Q: My USB drive didn't mount automatically?**  
-A: The script attempts to find the largest non-system partition and add it to `/etc/fstab`. If you have a complex setup, you may need to manually adjust `/etc/fstab`.
+A: The script pins the partition currently mounted at `/mnt/usb` (or the single non-system USB partition) and adds it to `/etc/fstab`. If several USB disks are present and `/mnt/usb` is not mounted, it refuses to guess. If you have a complex setup, you may need to manually adjust `/etc/fstab`.
 
 **Q: How do I see the logs?**  
 A: All optimization logs are at `/var/log/rpi-optimize.log`. Diagnostic logs are at `/var/log/rpi-diag.log`.

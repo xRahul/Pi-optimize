@@ -10,6 +10,8 @@ This document compiles the hardware, operating system, network, storage, swap, a
 *   **CPU Frequency:** Running at 2.4 GHz stock, configured with the `performance` scaling governor (persisted via `cpu-governor.service`).
 *   **System Memory (RAM):** 8GB LPDDR5 (typical headless usage has low baseline RAM utilization, leaving ample buffer/cache space).
 *   **Thermal Status:** Operating under active cooling (onboard hardware Active Cooler or heavy-duty heatsink) to maintain low temperatures.
+*   **Fan Curve:** Raspberry Pi stock Active Cooler profile (`fan_temp0=50000`/speed 75, `fan_temp1=60000`/speed 125; firmware defaults above, full speed at 75 °C).
+*   **Watchdog:** Broadcom BCM2835 hardware watchdog armed by systemd (`RuntimeWatchdogSec=15s` in `/etc/systemd/system.conf.d/watchdog.conf`); `watchdog.service` stays masked because PID1 owns `/dev/watchdog0`.
 *   **PCIe Config:** External PCIe port enabled with stable PCIe Gen 2.0 speeds configured (`dtparam=pciex1`, `dtparam=pciex1_gen=2` in `/boot/firmware/config.txt`) for SSD stability.
 *   **Power Delivery:** Supported by official 27W 5V/5A power supply (prevents brownouts or USB current throttling).
 
@@ -18,7 +20,7 @@ This document compiles the hardware, operating system, network, storage, swap, a
 ## 2. Operating System & Kernel
 *   **OS Distribution:** Debian GNU/Linux 13 (trixie) (Raspberry Pi OS Lite 64-bit, headless server).
 *   **Kernel Version:** `6.x.y+rpt-rpi-2712` (Debian Trixie kernel suite)
-*   **Log Limiting:** Systemd journald size capped (`SystemMaxUse=100M` in `/etc/systemd/journald.conf`) to prevent disk wear and reclaim space.
+*   **Log Limiting:** Journald is configured via `/etc/systemd/journald.conf.d/optimize.conf` (`Storage=persistent`, `SystemMaxUse=1G`), and `rsyslog` keeps `/var/log/syslog`. On this platform journald may still write RAM journals (`/run/log/journal`), so `rsyslog` is the durable history.
 *   **Hardware Offloading:** Onboard Bluetooth (`dtoverlay=disable-bt`) and audio (`dtparam=audio=off`) disabled in `/boot/firmware/config.txt` to conserve power and IRQ resources.
 
 ---
@@ -40,7 +42,7 @@ This document compiles the hardware, operating system, network, storage, swap, a
 ---
 
 ## 4. Swap & Memory Tweaks
-*   **ZRAM Swap:** Active ZRAM partition `/dev/zram0` (Size: up to 4GB, compressed using `zstd` algorithm, priority 100).
+*   **ZRAM Swap:** Active ZRAM partition `/dev/zram0` (Size: 2GB, compressed using `zstd` algorithm, priority 100).
 *   **Swappiness:** System-wide swappiness set to aggressive level (`vm.swappiness = 150`) to optimize memory eviction into ZRAM cache before page writeout.
 *   **Flash Wear Swap Protection:** 
     *   Disk-based default swap (`dphys-swapfile`) is disabled and uninstalled.
@@ -49,7 +51,7 @@ This document compiles the hardware, operating system, network, storage, swap, a
     *   *NVMe Boot Exception:* If booting from NVMe, a 4GB static swapfile (`/swapfile`, priority 10) is created and enabled on the SSD to handle extreme memory overflow.
 *   **Database/Valkey Tuning:** 
     *   MGLRU thrashing threshold: `min_ttl_ms` configured to `1000` via `/sys/kernel/mm/lru_gen/min_ttl_ms`.
-    *   Transparent Hugepages (THP): Set to `madvise` to prevent memory allocation latency for database and cache structures.
+    *   Transparent Hugepages (THP): Not exposed by this kernel (`/sys/kernel/mm/transparent_hugepage` absent); the suite applies `madvise` only where the sysfs interface exists.
 
 ---
 

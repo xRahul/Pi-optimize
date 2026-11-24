@@ -23,7 +23,7 @@ fi
 
 # --- Constants & Environment ---
 SCRIPT_VERSION="4.6.1"
-CONFIG_FILE="/boot/firmware/config.txt"
+CONFIG_FILE="${CONFIG_FILE:-/boot/firmware/config.txt}"
 export BACKUP_DIR="/var/backups/rpi-optimize"
 LOG_FILE="/var/log/rpi-optimize.log"
 LOCK_FILE="/run/rpi-optimize.lock"
@@ -113,6 +113,57 @@ add_cmdline_param() {
 # 1. Hardware & Thermal
 ################################################################################
 
+# Pi 5 quiet cooling: Raspberry Pi stock Active Cooler profile
+optimize_fan_curve() {
+    local -A desired=(
+        [fan_temp0]=50000
+        [fan_temp0_hyst]=5000
+        [fan_temp0_speed]=75
+        [fan_temp1]=60000
+        [fan_temp1_speed]=125
+    )
+    local key stale=0
+    for key in "${!desired[@]}"; do
+        grep -qE "^dtparam=${key}=${desired[$key]}$" "$CONFIG_FILE" || stale=1
+    done
+    if [[ "$stale" -eq 0 ]]; then
+        log_skip "Fan curve already configured"
+        return
+    fi
+    if grep -qE "^dtparam=fan_temp[0-9]" "$CONFIG_FILE"; then
+        for key in "${!desired[@]}"; do
+            if grep -qE "^dtparam=${key}=" "$CONFIG_FILE"; then
+                sed -i -E "s|^dtparam=${key}=.*|dtparam=${key}=${desired[$key]}|" "$CONFIG_FILE"
+            else
+                echo "dtparam=${key}=${desired[$key]}" >> "$CONFIG_FILE"
+            fi
+        done
+        log_pass "Fan curve updated to quiet profile (50°C start)"
+    else
+        log_info "Applying quiet fan curve (50°C start)..."
+        echo "" >> "$CONFIG_FILE"
+        {
+            echo "# Active Cooling for Pi 5"
+            for key in fan_temp0 fan_temp0_hyst fan_temp0_speed fan_temp1 fan_temp1_speed; do
+                echo "dtparam=${key}=${desired[$key]}"
+            done
+        } >> "$CONFIG_FILE"
+        log_pass "Fan curve optimized"
+    fi
+}
+
+# systemd PID1 owns /dev/watchdog0 via RuntimeWatchdogSec; watchdog.service must stay masked
+assert_watchdog_armed() {
+    command_exists systemctl || return 0
+    local wd_secs
+    wd_secs=$(systemctl show -p RuntimeWatchdogUSec 2>/dev/null | cut -d= -f2)
+    if [[ -n "$wd_secs" && "$wd_secs" != "0" && "$wd_secs" != "infinity" ]]; then
+        log_pass "Watchdog armed by systemd ($wd_secs); watchdog.service stays masked"
+    else
+        log_warn "Watchdog not armed: set RuntimeWatchdogSec in /etc/systemd/system.conf.d/watchdog.conf"
+    fi
+}
+
 optimize_hardware() {
     log_section "HARDWARE & THERMAL"
 
@@ -127,23 +178,7 @@ optimize_hardware() {
     fi
 
     # Pi 5 Quiet Cooling
-    if grep -q "^dtparam=fan_temp0" "$CONFIG_FILE"; then
-        log_skip "Fan curve already configured"
-    else
-        log_info "Applying quiet fan curve (50°C start)..."
-        # Ensure newline before appending
-        echo "" >> "$CONFIG_FILE"
-        cat >> "$CONFIG_FILE" << 'EOF'
-
-# Active Cooling for Pi 5
-dtparam=fan_temp0=50000
-dtparam=fan_temp0_hyst=5000
-dtparam=fan_temp0_speed=75
-dtparam=fan_temp1=60000
-dtparam=fan_temp1_speed=125
-EOF
-        log_pass "Fan curve optimized"
-    fi
+    optimize_fan_curve
 
     # Pi 5 PCIe Config (Gen 2 for maximum stability/endurance)
     # Remove/comment any pciex1_gen=3 entries to avoid conflicts
@@ -284,9 +319,7 @@ EOF
         log_pass "Hardware watchdog enabled in config.txt"
     fi
 
-    if command_exists systemctl; then
-        systemctl enable --now watchdog 2>/dev/null || log_warn "Watchdog service failed to start"
-    fi
+    assert_watchdog_armed
 
     # USB Autosuspend (Vital for USB Boot/Storage)
     add_cmdline_param "usbcore.autosuspend=-1"
@@ -308,8 +341,11 @@ optimize_cpu() {
     else
         # Set governor to performance immediately (runtime)
         if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-            echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1 || log_warn "Failed to set CPU governor at runtime"
-            log_pass "CPU governor set to performance (runtime)"
+            if echo "performance" | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1; then
+                log_pass "CPU governor set to performance (runtime)"
+            else
+                log_warn "Failed to set CPU governor at runtime"
+            fi
         fi
     fi
 
@@ -534,8 +570,11 @@ EOF
         backup_file "$sysctl_conf"
         mv -f "$tmp_conf" "$sysctl_conf"
         chmod 0644 "$sysctl_conf"
-        sysctl -p "$sysctl_conf" >/dev/null 2>&1 || log_warn "Some sysctl parameters failed to apply"
-        log_pass "Kernel parameters optimized (including BBR & Security)"
+        if sysctl -p "$sysctl_conf" >/dev/null 2>&1; then
+            log_pass "Kernel parameters optimized (including BBR & Security)"
+        else
+            log_warn "Some sysctl parameters failed to apply"
+        fi
     else
         rm "$tmp_conf"
         log_skip "Kernel parameters already optimized"
@@ -543,8 +582,11 @@ EOF
 
     # MGLRU Optimization (if enabled in kernel)
     if [[ -f /sys/kernel/mm/lru_gen/enabled ]]; then
-        echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || true
-        log_pass "MGLRU thrashing threshold optimized"
+        if echo 1000 > /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null; then
+            log_pass "MGLRU thrashing threshold optimized"
+        else
+            log_warn "Could not set MGLRU min_ttl_ms"
+        fi
 
         # Persist MGLRU min_ttl_ms via tmpfiles.d
         local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
@@ -670,9 +712,24 @@ setup_usb_automount() {
 
     # Look for USB/SD/MMC PARTITIONS, excluding root disk
     # We want partitions (TYPE="part") on specific transports (TRAN="usb" etc)
-    local usb_device
-    usb_device=$(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
-        awk -v root="$root_disk" '/usb|sd|mmc/ && /part/ && !index($0, root) { print $1; exit }')
+    local usb_device=""
+    local usb_candidates=()
+    mapfile -t usb_candidates < <(lsblk -nr -o NAME,TRAN,TYPE,PKNAME 2>/dev/null | \
+        awk -v root="$root_disk" '/usb|sd|mmc/ && /part/ && !index($0, root) { print $1 }')
+    # Prefer the device already mounted at $mount_path when fstab binds it: prevents
+    # re-pointing /mnt/usb at a different disk (e.g. only the backup HDD plugged in).
+    local pinned_source=""
+    if grep -qE "^[^#]*[[:space:]]${mount_path}[[:space:]]" "$fstab_file"; then
+        pinned_source=$(findmnt -n -o SOURCE "$mount_path" 2>/dev/null || true)
+    fi
+    if [[ -n "$pinned_source" ]]; then
+        usb_device=$(basename "$pinned_source")
+    elif [[ ${#usb_candidates[@]} -eq 1 ]]; then
+        usb_device="${usb_candidates[0]}"
+    elif [[ ${#usb_candidates[@]} -gt 1 ]]; then
+        log_warn "Multiple USB partitions found and $mount_path is not mounted. Refusing to guess."
+        return
+    fi
 
     if [[ -z "$usb_device" ]]; then
         log_warn "No USB device detected. Manual fstab configuration may be required."
@@ -693,9 +750,13 @@ setup_usb_automount() {
         return
     fi
 
-    # Detect filesystem type
+    # Detect filesystem type (no ext4 fallback: wrong options would be written for unknown devices)
     local fs_type
-    fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null || echo "ext4")
+    fs_type=$(blkid -s TYPE -o value "$usb_dev_path" 2>/dev/null)
+    if [[ -z "$fs_type" ]]; then
+        log_warn "Could not determine filesystem type for $usb_dev_path. Manual configuration required."
+        return
+    fi
 
     # Add appropriate mount options based on filesystem
     local mount_opts="defaults,nofail,noatime"
@@ -1229,8 +1290,11 @@ EOF
     # 16k page size systems benefit from 'madvise' to prevent fragmentation
     log_info "Optimizing Transparent Hugepages..."
     if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
-        echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || log_warn "Could not set THP at runtime"
-        log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
+        if echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null; then
+            log_pass "THP set to 'madvise' (optimal for Valkey/Redis)"
+        else
+            log_warn "Could not set THP at runtime"
+        fi
 
         # Persist THP via tmpfiles.d
         local tmpfiles_conf="/etc/tmpfiles.d/sysfs-tuning.conf"
@@ -1319,16 +1383,34 @@ optimize_logs() {
     log_section "LOG MANAGEMENT"
 
     if [[ "${BOOT_TRAN:-}" == "nvme" ]]; then
-        # On NVMe boot, we want persistent journaling and logging
-        local journal_conf="/etc/systemd/journald.conf.d/optimize.conf"
-        if [[ -f "$journal_conf" ]]; then
-            log_info "NVMe boot detected. Restoring persistent journald logging..."
-            rm -f "$journal_conf"
+        # On NVMe boot journald must be persistent and explicitly sized: the dpkg-owned
+        # /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf forces volatile,
+        # so setting Storage=persistent is required (deleting our drop-in is not enough).
+        # Known quirk: Debian 13 journald 257 on Pi 5 ignores Storage= entirely (verified
+        # 2026-11: Storage=none still wrote /run journals); rsyslog stays the durable log.
+        local journal_conf_dir="/etc/systemd/journald.conf.d"
+        local journal_conf="${journal_conf_dir}/optimize.conf"
+        local legacy_conf="${journal_conf_dir}/rpi-optimize.conf"
+        local tmp_conf
+        tmp_conf=$(mktemp)
+        mkdir -p "$journal_conf_dir"
+        cat > "$tmp_conf" << 'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+SystemMaxFileSize=100M
+Compress=yes
+EOF
+        if files_differ "$journal_conf" "$tmp_conf"; then
+            mv -f "$tmp_conf" "$journal_conf"
+            chmod 0644 "$journal_conf"
             systemctl restart systemd-journald
-            log_pass "Journald volatile override removed (logs are now persistent)"
+            log_pass "Journald persistent (Storage=persistent, 1G cap)"
         else
-            log_skip "Journald logging is already persistent"
+            rm "$tmp_conf"
+            log_skip "Journald persistent logging already configured"
         fi
+        rm -f "$legacy_conf"
 
         # If busybox-syslogd is installed, purge it and install rsyslog to restore persistent syslog
         if command_exists dpkg && dpkg -l | grep -q "busybox-syslogd"; then
@@ -1370,6 +1452,8 @@ EOF
         rm "$tmp_conf"
         log_skip "Journald already optimized"
     fi
+    # Remove the orphan drop-in from an older layout; it would otherwise override ours
+    rm -f "${journal_conf_dir}/rpi-optimize.conf"
 
     # Log2Ram (if installed)
     if [[ -f /etc/log2ram.conf ]]; then
@@ -1620,7 +1704,7 @@ optimize_eeprom() {
         fi
     fi
 
-    # Ensure BOOT_UART=1 to preserve components when halted
+    # Keep BOOT_UART=1 so boot-ROM firmware UART logging stays available for diagnostics
     if ! grep -q "^BOOT_UART=" "$new_config_file"; then
         echo "BOOT_UART=1" >> "$new_config_file"
         need_update=true
@@ -1698,7 +1782,12 @@ EOF
     # 3. Zwc compile target user's .zshrc and custom plugins for faster load time
     log_info "Compiling Zsh config and custom plugins for faster loading..."
     if command_exists zsh; then
-        sudo -u "$target_user" zsh -c 'zcompile ~/.zshrc' 2>/dev/null || log_warn "zcompile of .zshrc failed"
+        if sudo -u "$target_user" zsh -c 'zcompile ~/.zshrc' 2>/dev/null; then
+            log_pass "Zsh configurations successfully compiled to bytecode (.zwc)"
+            ((OPTIMIZATIONS_APPLIED++)) || true
+        else
+            log_warn "zcompile of .zshrc failed"
+        fi
         # Compile plugins if they exist
         local plugin_dir="${target_home}/.oh-my-zsh/custom/plugins"
         if [[ -d "$plugin_dir" ]]; then
@@ -1710,8 +1799,6 @@ EOF
                 done
             '
         fi
-        log_pass "Zsh configurations successfully compiled to bytecode (.zwc)"
-        ((OPTIMIZATIONS_APPLIED++)) || true
     else
         log_warn "zsh command not found, cannot compile config files"
         ((OPTIMIZATIONS_SKIPPED++)) || true
@@ -1776,9 +1863,7 @@ system_maintenance() {
         # or publish ports bound to 127.0.0.1/tailscale0 only.
     fi
 
-    log_info "Removing documentation to save space..."
-    rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* 2>/dev/null || true
-    log_pass "Documentation cleared"
+    log_info "Removing build caches to save space..."
 
     # Clean user-level caches that accumulate on the OS flash drive
     local target_user
