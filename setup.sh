@@ -57,17 +57,17 @@ apt_get() {
 
 preflight_checks() {
     log_section "PRE-FLIGHT CHECKS"
-    
+
     if [[ ! -f /etc/os-release ]]; then
         log_error "OS release unknown"
     fi
     # shellcheck disable=SC1091
     source /etc/os-release
     log_info "OS: ${PRETTY_NAME:-Unknown}"
-    
+
     [[ "$(uname -m)" != "aarch64" ]] && log_error "64-bit ARM required"
     log_pass "Architecture: aarch64"
-    
+
     ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || log_error "Internet required"
     log_pass "Connectivity: OK"
 
@@ -79,7 +79,7 @@ preflight_checks() {
     parent_dev=$(lsblk -nd -o PKNAME -p "$boot_dev" 2>/dev/null)
     [[ -z "$parent_dev" ]] && parent_dev="$boot_dev"
     BOOT_TRAN=$(lsblk -nd -o TRAN "$parent_dev" 2>/dev/null)
-    
+
     if [[ "$BOOT_TRAN" == "usb" ]]; then
         log_pass "Boot Drive: USB Flash/SSD detected"
         log_info "Flash wear-level optimizations (RAM logging, delayed writebacks, adjusted commit intervals) will be applied."
@@ -97,7 +97,7 @@ preflight_checks() {
 
 system_core() {
     log_section "SYSTEM CORE"
-    
+
     # shellcheck disable=SC2015
     apt_get update && apt_get full-upgrade -y || log_error "Apt upgrade failed"
     log_pass "System updated"
@@ -106,10 +106,10 @@ system_core() {
         log_info "Checking for bootloader EEPROM updates..."
         rpi-eeprom-update -a || log_warn "EEPROM update failed or no update available"
     fi
-    
+
     local packages=(
-        "ca-certificates" "curl" "gnupg" "git" "jq" "bc" 
-        "usbutils" "util-linux" "e2fsprogs" 
+        "ca-certificates" "curl" "gnupg" "git" "jq" "bc"
+        "usbutils" "util-linux" "e2fsprogs"
         "smartmontools" "systemd-zram-generator" "fail2ban" "ufw"
         "htop" "vim" "tmux" "net-tools" "lsb-release" "rng-tools5"
         "bats" "network-manager" "ethtool" "zsh"
@@ -119,7 +119,7 @@ system_core() {
     else
         packages+=("busybox-syslogd")
     fi
-    
+
     # Optimize: Bulk check installed packages
     declare -A installed_map
     # shellcheck disable=SC2034
@@ -172,14 +172,14 @@ system_core() {
 
 docker_suite() {
     log_section "DOCKER SUITE"
-    
+
     if ! command_exists docker; then
         curl -fsSL https://get.docker.com | sh || log_error "Docker install failed"
     fi
     log_pass "Docker installed: $(docker --version)"
-    
+
     systemctl enable --now docker 2>/dev/null || log_warn "Docker service could not be enabled/started"
-    
+
     local target_user
     target_user=$(get_target_user)
 
@@ -196,7 +196,7 @@ docker_suite() {
 
 nodejs_tooling() {
     log_section "NODE.JS & TOOLING"
-    
+
     # Node >= 22 required; distro node 18/20 does not satisfy this
     local installed_major
     installed_major=$(node -v 2>/dev/null | sed -n 's/^v\([0-9]\+\).*/\1/p' || true)
@@ -220,7 +220,7 @@ nodejs_tooling() {
         apt_get install -y nodejs
     fi
     log_pass "Node.js: $(node -v)"
-    
+
     # Global npm config for non-root
     local target_user
     target_user=$(get_target_user)
@@ -232,7 +232,7 @@ nodejs_tooling() {
         mkdir -p "$npm_global"
         chown -R "$target_user" "$npm_global"
         sudo -u "$target_user" npm config set prefix "$npm_global"
-        
+
         if ! grep -q ".npm-global/bin" "$target_home/.bashrc"; then
             # shellcheck disable=SC2016
             echo 'export PATH=~/.npm-global/bin:$PATH' >> "$target_home/.bashrc"
@@ -507,7 +507,7 @@ EOF
 
 usb_optimization() {
     log_section "USB & OPTIMIZATION"
-    
+
     # Prepare USB mount directory
     local mount_path="${USB_MOUNT_PATH}"
     if [[ ! -d "$mount_path" ]]; then
@@ -516,7 +516,7 @@ usb_optimization() {
     else
         log_skip "Mount directory already exists: $mount_path"
     fi
-    
+
     # Run optimize.sh for system-wide tuning (honest handoff: failures propagate)
     if [[ -f "${SCRIPT_DIR}/optimize.sh" ]]; then
         chmod +x "${SCRIPT_DIR}/optimize.sh"
@@ -543,7 +543,7 @@ usb_optimization() {
 
     # Configure forced mount on startup (runs before Docker)
     local service_file="/etc/systemd/system/startup-mounts.service"
-    
+
     # Check if service exists and has correct content (simple check)
     if [[ -f "$service_file" ]] && grep -q "Before=docker.service" "$service_file"; then
         log_skip "Startup mount service already configured"
@@ -705,12 +705,12 @@ main() {
     install_ollama
     usb_optimization
     configure_syncthing
-    
+
     # Post-setup verification and reload
     if systemctl daemon-reload 2>/dev/null; then
         log_pass "Systemd daemon reloaded"
     fi
-    
+
     # Try to mount all local filesystems from fstab (non-blocking)
     mount -a 2>/dev/null || log_warn "Some mounts failed (may be expected)"
 
@@ -730,7 +730,7 @@ main() {
     log_info "  • Log files: /var/log/rpi-optimize.log"
     echo ""
     log_warn "⚠️  REBOOT IS REQUIRED TO APPLY ALL CHANGES"
-    
+
     if confirm_action "Reboot now?"; then
         log_info "Rebooting in 10 seconds... (Press Ctrl+C to cancel)"
         sleep 10
